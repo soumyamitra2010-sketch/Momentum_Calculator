@@ -1,11 +1,16 @@
 """
 ETF Universe Data Module
-Contains the ETF universe metadata and synthetic price generation for backtesting.
+Downloads live market data from NSE via yfinance (.NS suffix).
+Caches data daily to avoid repeated downloads.
 """
 
-import random
-import math
-from datetime import datetime, timedelta
+import os
+import ssl
+import json
+import pandas as pd
+from datetime import datetime
+
+PROXY_URL = "http://zs-proxy.agl.int/"
 
 ETF_UNIVERSE = [
     {"scrip": "ABSLPSE", "sector": "ETF - PSE", "segment": "", "market_cap": 850, "lcp": 10.51},
@@ -60,62 +65,188 @@ ETF_UNIVERSE = [
 ]
 
 
-def generate_trading_days(start_date: str, end_date: str) -> list:
-    """Generate list of trading days (weekdays) between start and end dates."""
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    days = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:  # Mon-Fri
-            days.append(current.strftime("%Y-%m-%d"))
-        current += timedelta(days=1)
-    return days
+# Benchmarks: ETF-type use prices already downloaded with the universe;
+# index-type are fetched separately.
+BENCHMARKS = [
+    {"name": "Nifty 50",         "yahoo": "^NSEI",           "etf_scrip": None},
+    {"name": "Midcap 150",       "yahoo": "MID150BEES.NS",   "etf_scrip": "MID150BEES"},
+    {"name": "Smallcap 250",     "yahoo": "HDFCSML250.NS",   "etf_scrip": "HDFCSML250"},
+    {"name": "Next 50",          "yahoo": "JUNIORBEES.NS",   "etf_scrip": "JUNIORBEES"},
+    {"name": "Gold",             "yahoo": "GOLDBEES.NS",     "etf_scrip": "GOLDBEES"},
+    {"name": "Silver",           "yahoo": "SILVERBEES.NS",   "etf_scrip": "SILVERBEES"},
+]
+
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".price_cache.json")
+CACHE_VERSION = 2  # bump when cache structure changes
 
 
-def generate_synthetic_prices(seed: int = 42) -> dict:
+def download_all_data(start_date="2020-01-01"):
     """
-    Generate synthetic daily price data for all ETFs from 2022-01-01 to 2026-04-18.
-    Returns dict: {ticker: {date_str: close_price}}
-    Each ETF gets a unique drift/volatility profile seeded deterministically.
+    Download live ETF prices (with .NS suffix) and multiple benchmarks.
+    Returns (etf_prices, benchmark_prices, trading_days).
+    - etf_prices: {scrip: {date_str: close_price}}
+    - benchmark_prices: {name: {date_str: close_price}}  (multi-benchmark)
+    - trading_days: sorted list of date strings (actual market trading days)
     """
-    random.seed(seed)
-    trading_days = generate_trading_days("2022-01-01", "2026-04-18")
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    all_prices = {}
-    for i, etf in enumerate(ETF_UNIVERSE):
-        ticker = etf["scrip"]
-        base_price = etf["lcp"] * random.uniform(0.5, 1.5)
-        # Unique drift and volatility per ETF
-        annual_drift = random.uniform(-0.05, 0.25)
-        annual_vol = random.uniform(0.12, 0.45)
-        daily_drift = annual_drift / 252
-        daily_vol = annual_vol / math.sqrt(252)
+    # Try loading from daily cache
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                cache = json.load(f)
+            if cache.get("cache_date") == today and cache.get("cache_version") == CACHE_VERSION:
+                bm = cache["benchmark_prices"]
+                n_bm = len(bm) if isinstance(bm, dict) and not any(isinstance(v, (int, float)) for v in list(bm.values())[:1]) else 0
+                print(f"[Cache] Using cached data: {len(cache['etf_prices'])} ETFs, "
+                      f"{n_bm} benchmarks, {len(cache['trading_days'])} trading days")
+                return cache["etf_prices"], cache["benchmark_prices"], cache["trading_days"]
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-        prices = {}
-        price = base_price
-        rng = random.Random(seed + i * 1000)
-        for day in trading_days:
-            shock = rng.gauss(0, 1)
-            price *= math.exp(daily_drift - 0.5 * daily_vol ** 2 + daily_vol * shock)
-            price = max(price, 0.01)  # floor
-            prices[day] = round(price, 2)
-        all_prices[ticker] = prices
+    print("=" * 60)
+    print("  Downloading live market data from NSE")
+    print("=" * 60)
 
-    return all_prices
+    etf_prices, etf_days = _download_etf_prices(start_date, today)
+    benchmark_prices = _download_benchmarks(etf_prices, start_date, today)
+
+    # Trading days = union of all days with data
+    all_days = set(etf_days)
+    for bm_data in benchmark_prices.values():
+        all_days.update(bm_data.keys())
+    trading_days = sorted(all_days)
+
+    bm_summary = ", ".join(f"{k}: {len(v)}d" for k, v in benchmark_prices.items())
+    print(f"\nSummary: {len(etf_prices)} ETFs, {len(benchmark_prices)} benchmarks, "
+          f"{len(trading_days)} trading days")
+    print(f"  Benchmarks: {bm_summary}")
+
+    # Save to cache
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump({
+                "cache_date": today,
+                "cache_version": CACHE_VERSION,
+                "etf_prices": etf_prices,
+                "benchmark_prices": benchmark_prices,
+                "trading_days": trading_days,
+            }, f)
+        print("[Cache] Saved to .price_cache.json")
+    except Exception as e:
+        print(f"[Cache] Warning: Could not save cache: {e}")
+
+    return etf_prices, benchmark_prices, trading_days
 
 
-# Benchmark: simple Nifty50 proxy
-def generate_benchmark_prices(seed: int = 99) -> dict:
-    """Generate a synthetic Nifty50 benchmark series."""
-    trading_days = generate_trading_days("2022-01-01", "2026-04-18")
-    rng = random.Random(seed)
-    price = 17000.0
-    daily_drift = 0.10 / 252
-    daily_vol = 0.15 / math.sqrt(252)
-    prices = {}
-    for day in trading_days:
-        shock = rng.gauss(0, 1)
-        price *= math.exp(daily_drift - 0.5 * daily_vol ** 2 + daily_vol * shock)
-        prices[day] = round(price, 2)
-    return prices
+def _make_session():
+    """Create a requests Session with proxy and SSL settings for corporate networks."""
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    session = requests.Session()
+    session.verify = False
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    })
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or PROXY_URL
+    session.proxies = {"http": proxy, "https": proxy}
+    return session
+
+
+def _fetch_yahoo_chart(session, ticker, start_date, end_date):
+    """Fetch close prices from Yahoo Finance v8 chart API directly.
+    Returns dict {date_str: close_price} or empty dict on failure.
+    """
+    import time
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp()) + 86400
+
+    url = (f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+           f"?period1={start_ts}&period2={end_ts}&interval=1d")
+
+    for attempt in range(3):
+        try:
+            resp = session.get(url, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+            result = data.get("chart", {}).get("result")
+            if not result:
+                return {}
+            timestamps = result[0].get("timestamp", [])
+            closes = result[0].get("indicators", {}).get("adjclose")
+            if not closes:
+                closes = result[0].get("indicators", {}).get("quote", [{}])
+                close_vals = closes[0].get("close", []) if closes else []
+            else:
+                close_vals = closes[0].get("adjclose", [])
+
+            if not timestamps or not close_vals:
+                return {}
+
+            prices = {}
+            for ts, val in zip(timestamps, close_vals):
+                if val is not None and val > 0:
+                    date_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+                    prices[date_str] = round(float(val), 2)
+            return prices
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+    return {}
+
+
+def _download_etf_prices(start_date, end_date):
+    """Download ETF close prices from NSE (.NS suffix) using Yahoo chart API."""
+    import time
+    print(f"\nDownloading {len(ETF_UNIVERSE)} ETFs ({start_date} to {end_date})...")
+
+    etf_prices = {}
+    trading_days = set()
+    session = _make_session()
+    total = len(ETF_UNIVERSE)
+
+    for idx, etf in enumerate(ETF_UNIVERSE):
+        ticker_ns = etf["scrip"] + ".NS"
+        scrip = etf["scrip"]
+        prices = _fetch_yahoo_chart(session, ticker_ns, start_date, end_date)
+        if prices:
+            etf_prices[scrip] = prices
+            trading_days.update(prices.keys())
+            print(f"  [{idx+1}/{total}] {scrip}: {len(prices)} days")
+        else:
+            print(f"  [{idx+1}/{total}] {scrip}: no data")
+        # small delay to avoid rate-limiting
+        if (idx + 1) % 5 == 0:
+            time.sleep(0.5)
+
+    print(f"  Loaded {len(etf_prices)} / {total} ETFs")
+    return etf_prices, trading_days
+
+
+def _download_benchmarks(etf_prices, start_date, end_date):
+    """Download all benchmarks. Reuses ETF price data where possible."""
+    import time
+    print(f"\nDownloading {len(BENCHMARKS)} benchmarks...")
+    session = _make_session()
+    result = {}
+    for bm in BENCHMARKS:
+        name = bm["name"]
+        etf_scrip = bm.get("etf_scrip")
+        if etf_scrip and etf_scrip in etf_prices:
+            result[name] = etf_prices[etf_scrip]
+            print(f"  {name}: {len(result[name])} days (from ETF {etf_scrip})")
+        else:
+            prices = _fetch_yahoo_chart(session, bm["yahoo"], start_date, end_date)
+            if prices:
+                result[name] = prices
+                print(f"  {name}: {len(prices)} days (downloaded {bm['yahoo']})")
+            else:
+                print(f"  {name}: no data for {bm['yahoo']} — skipped")
+            time.sleep(0.3)
+    return result

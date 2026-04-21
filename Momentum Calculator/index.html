@@ -193,7 +193,7 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
         </div>
         <div class="form-group">
           <label>End Date</label>
-          <input type="date" id="endDate" value="2026-04-18">
+          <input type="date" id="endDate" value="">
         </div>
         <div class="form-group">
           <label>Portfolio Size</label>
@@ -222,6 +222,11 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
         <div class="form-group">
           <label>Transaction Cost (%)</label>
           <input type="number" id="txnCost" value="0" min="0" max="2" step="0.01">
+        </div>
+        <div class="form-group">
+          <label>Exit Rank Threshold</label>
+          <input type="number" id="exitRank" value="0" min="0" max="49" step="1">
+          <span style="font-size:0.7rem;color:var(--muted)">ETFs ranked below this are exited. 0 = auto (2× portfolio size)</span>
         </div>
         <div class="toggle-wrap">
           <label class="toggle">
@@ -256,6 +261,7 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
       <div class="metrics-row" id="metricsRow"></div>
       <div class="card">
         <h2>Equity Curve</h2>
+        <div id="bmSelectorDaily" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;font-size:0.82rem;"></div>
         <div class="chart-container">
           <canvas id="equityChart"></canvas>
         </div>
@@ -265,7 +271,9 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
         <div class="table-wrap">
           <table id="portfolioTable">
             <thead><tr>
-              <th>#</th><th>Scrip</th><th>Sector</th><th>Weight</th><th>Rank</th>
+              <th>#</th><th>Scrip</th><th>Sector</th><th>Units</th><th>Buy Price</th><th>Buy Date</th>
+              <th>Current Price</th><th>Invested (₹)</th><th>Current Value (₹)</th>
+              <th>P&amp;L%</th><th>Weight</th><th>Rank</th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -317,6 +325,7 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
       <!-- Monthly Equity Chart -->
       <div class="card">
         <h2>Monthly Equity Curve</h2>
+        <div id="bmSelectorMonthly" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;font-size:0.82rem;"></div>
         <div class="chart-container">
           <canvas id="monthlyEquityChart"></canvas>
         </div>
@@ -344,7 +353,7 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
               <div class="table-wrap" style="max-height:400px;overflow-y:auto;">
                 <table id="monthPortfolioTable">
                   <thead><tr>
-                    <th>#</th><th>Scrip</th><th>Weight</th><th>Rank</th>
+                    <th>#</th><th>Scrip</th><th>Units</th><th>Buy Price</th><th>Cur Value (₹)</th><th>P&amp;L%</th><th>Weight</th><th>Rank</th>
                   </tr></thead>
                   <tbody></tbody>
                 </table>
@@ -372,25 +381,7 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
         </p>
         <div class="table-wrap" style="max-height:600px;overflow-y:auto;">
           <table id="validationTable" style="font-size:0.8rem;">
-            <thead><tr>
-              <th>Month</th>
-              <th>Open (₹)</th>
-              <th>Close (₹)</th>
-              <th>High (₹)</th>
-              <th>Low (₹)</th>
-              <th>Month Ret%</th>
-              <th>Cumul. Ret%</th>
-              <th>Bench Ret%</th>
-              <th>Alpha%</th>
-              <th>DD from Peak%</th>
-              <th>Peak (₹)</th>
-              <th>Days</th>
-              <th>Rebal</th>
-              <th>Exits</th>
-              <th>Entries</th>
-              <th>Txn Cost (₹)</th>
-              <th>Portfolio</th>
-            </tr></thead>
+            <thead><tr id="validationTableHead"></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -465,6 +456,21 @@ function removeTimeframe(idx) {
 
 renderTimeframes();
 
+// ── Fetch available date range from API on page load ─────────────────
+(async function initDates() {
+  try {
+    const resp = await fetch(API + '/info');
+    const info = await resp.json();
+    if (info.last_date) {
+      document.getElementById('endDate').value = info.last_date;
+    } else {
+      document.getElementById('endDate').value = new Date().toISOString().split('T')[0];
+    }
+  } catch (e) {
+    document.getElementById('endDate').value = new Date().toISOString().split('T')[0];
+  }
+})();
+
 // ── Toast ────────────────────────────────────────────────────────────
 function showToast(msg, isError = false) {
   const t = document.getElementById('toast');
@@ -486,6 +492,7 @@ async function runBacktest() {
     rebal_day: +document.getElementById('rebalDay').value,
     initial_capital: +document.getElementById('initialCapital').value,
     transaction_cost_pct: +document.getElementById('txnCost').value,
+    exit_rank: +document.getElementById('exitRank').value,
   };
 
   document.getElementById('loadingOverlay').classList.remove('hidden');
@@ -550,75 +557,147 @@ function renderResults(data) {
     </div>
   `).join('');
 
-  // Equity chart
+  // Build benchmark selector and render equity chart
+  buildBmSelector('bmSelectorDaily', data.benchmark_names || [], onDailyBmChange);
   renderEquityChart(data);
 
   // Portfolio table
   const tbody = document.querySelector('#portfolioTable tbody');
   tbody.innerHTML = '';
+  const hd = data.final_holdings_detail || {};
+  let totalInvested = 0, totalCurrentVal = 0;
   data.final_portfolio.forEach((etf, i) => {
     const meta = data.universe_snapshot.find(u => u.scrip === etf) || {};
+    const h = hd[etf] || {};
+    totalInvested += h.invested || 0;
+    totalCurrentVal += h.current_value || 0;
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'positive' : 'negative';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${i + 1}</td>
       <td><strong>${etf}</strong></td>
       <td>${meta.sector || ''}</td>
+      <td>${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td>₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td>${h.buy_date || '-'}</td>
+      <td>₹${h.current_price ? h.current_price.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.invested ? h.invested.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td class="${pnlCls}">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
       <td>${(data.final_weights[etf] * 100).toFixed(1)}%</td>
       <td>${meta.rank || '-'}</td>
     `;
     tbody.appendChild(tr);
   });
+
+  // Total row
+  const totalPnlPct = totalInvested > 0 ? ((totalCurrentVal / totalInvested - 1) * 100).toFixed(2) : '0';
+  const totalPnlCls = parseFloat(totalPnlPct) >= 0 ? 'positive' : 'negative';
+  const totalTr = document.createElement('tr');
+  totalTr.style.fontWeight = 'bold';
+  totalTr.style.borderTop = '2px solid var(--accent)';
+  totalTr.innerHTML = `
+    <td colspan="3">Total Portfolio</td>
+    <td colspan="4"></td>
+    <td>₹${totalInvested.toLocaleString('en-IN')}</td>
+    <td>₹${totalCurrentVal.toLocaleString('en-IN')}</td>
+    <td class="${totalPnlCls}">${totalPnlPct}%</td>
+    <td>100%</td>
+    <td></td>
+  `;
+  tbody.appendChild(totalTr);
+}
+
+// Shared benchmark color/dash config
+const BM_COLORS = ['#8b8fa3', '#f59e0b', '#ef4444', '#10b981', '#fbbf24', '#94a3b8', '#ec4899'];
+const BM_DASHES = [[5,3],[8,4],[3,3],[6,3],[10,5],[4,4],[7,3]];
+
+function buildBmSelector(containerId, bmNames, onChange) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '<span style="color:var(--muted);margin-right:4px;">Benchmarks:</span>';
+  bmNames.forEach((name, idx) => {
+    const color = BM_COLORS[idx % BM_COLORS.length];
+    const id = containerId + '_bm_' + idx;
+    const checked = name === 'Nifty 50' ? 'checked' : '';
+    container.innerHTML += `
+      <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="checkbox" id="${id}" value="${name}" ${checked}
+               style="accent-color:${color};" onchange="(${onChange.name})()">
+        <span style="color:${color};font-weight:500;">${name}</span>
+      </label>`;
+  });
+}
+
+function getSelectedBm(containerId, bmNames) {
+  const selected = [];
+  bmNames.forEach((name, idx) => {
+    const cb = document.getElementById(containerId + '_bm_' + idx);
+    if (cb && cb.checked) selected.push(name);
+  });
+  return selected;
 }
 
 function renderEquityChart(data) {
   const ctx = document.getElementById('equityChart').getContext('2d');
   if (equityChartInstance) equityChartInstance.destroy();
 
+  const bmNames = data.benchmark_names || [];
+  const bmCurves = data.benchmark_curves || {};
+  const selectedBm = getSelectedBm('bmSelectorDaily', bmNames);
+
   // Downsample if too many points
   const maxPoints = 500;
   const eq = data.equity_curve;
-  const bm = data.benchmark_curve;
   const step = Math.max(1, Math.floor(eq.length / maxPoints));
 
-  const labels = [], eqData = [], bmData = [];
+  const labels = [], eqData = [];
+  const bmDataArrays = {};
+  selectedBm.forEach(name => { bmDataArrays[name] = []; });
+
   for (let i = 0; i < eq.length; i += step) {
     labels.push(eq[i].date);
     eqData.push(eq[i].value);
-    bmData.push(bm[i] ? bm[i].value : null);
+    selectedBm.forEach(name => {
+      const curve = bmCurves[name] || [];
+      bmDataArrays[name].push(curve[i] ? curve[i].value : null);
+    });
   }
+
+  const datasets = [
+    {
+      label: 'Portfolio',
+      data: eqData,
+      borderColor: '#6366f1',
+      backgroundColor: 'rgba(99,102,241,0.1)',
+      fill: true,
+      pointRadius: 0,
+      borderWidth: 2,
+      tension: 0.1,
+    },
+  ];
+
+  selectedBm.forEach(name => {
+    const idx = bmNames.indexOf(name);
+    datasets.push({
+      label: name,
+      data: bmDataArrays[name],
+      borderColor: BM_COLORS[idx % BM_COLORS.length],
+      borderDash: BM_DASHES[idx % BM_DASHES.length],
+      pointRadius: 0,
+      borderWidth: 1.5,
+      tension: 0.1,
+    });
+  });
 
   equityChartInstance = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Portfolio',
-          data: eqData,
-          borderColor: '#6366f1',
-          backgroundColor: 'rgba(99,102,241,0.1)',
-          fill: true,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.1,
-        },
-        {
-          label: 'Nifty 50 Benchmark',
-          data: bmData,
-          borderColor: '#8b8fa3',
-          borderDash: [5, 3],
-          pointRadius: 0,
-          borderWidth: 1.5,
-          tension: 0.1,
-        },
-      ],
-    },
+    data: { labels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { color: '#8b8fa3', font: { size: 12 } } },
+        legend: { labels: { color: '#8b8fa3', font: { size: 11 } } },
         tooltip: {
           backgroundColor: '#1a1d29',
           titleColor: '#e1e4ea',
@@ -647,6 +726,10 @@ function renderEquityChart(data) {
     },
   });
 }
+
+// Callbacks for checkbox changes
+function onDailyBmChange() { if (lastResult) renderEquityChart(lastResult); }
+function onMonthlyBmChange() { if (lastResult) renderMonthlyChartFromData(lastResult); }
 
 // ── Render Universe ──────────────────────────────────────────────────
 function renderUniverse(data) {
@@ -694,6 +777,44 @@ function renderUniverse(data) {
 }
 
 // ── Render Events ────────────────────────────────────────────────────
+function formatHoldingsDetail(hd) {
+  if (!hd || !Object.keys(hd).length) return '';
+  let html = '<table style="font-size:0.75rem;margin-top:6px;width:100%;border-collapse:collapse;">';
+  html += '<tr style="color:var(--muted);border-bottom:1px solid var(--border);">';
+  html += '<th style="text-align:left;padding:2px 6px;">ETF</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Units</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Buy Price</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Cur Price</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Invested</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Cur Value</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">P&L%</th></tr>';
+  let totInv = 0, totCur = 0;
+  Object.entries(hd).forEach(([etf, h]) => {
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    totInv += h.invested || 0;
+    totCur += h.current_value || 0;
+    html += `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:2px 6px;">${etf}</td>
+      <td style="text-align:right;padding:2px 6px;">${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.current_price ? h.current_price.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.invested ? h.invested.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;color:${pnlCls};">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
+    </tr>`;
+  });
+  const totPnl = totInv > 0 ? ((totCur / totInv - 1) * 100).toFixed(2) : '0';
+  const totPnlCls = parseFloat(totPnl) >= 0 ? 'var(--green)' : 'var(--red)';
+  html += `<tr style="font-weight:bold;border-top:2px solid var(--accent);">
+    <td style="padding:2px 6px;">Total</td><td></td><td></td><td></td>
+    <td style="text-align:right;padding:2px 6px;">₹${totInv.toLocaleString('en-IN')}</td>
+    <td style="text-align:right;padding:2px 6px;">₹${totCur.toLocaleString('en-IN')}</td>
+    <td style="text-align:right;padding:2px 6px;color:${totPnlCls};">${totPnl}%</td>
+  </tr>`;
+  html += '</table>';
+  return html;
+}
+
 function renderEvents(data) {
   if (!data.events || !data.events.length) return;
   document.getElementById('noEvents').style.display = 'none';
@@ -704,10 +825,12 @@ function renderEvents(data) {
   data.events.forEach(ev => {
     const item = document.createElement('div');
     item.className = 'event-item';
+    const hdTable = formatHoldingsDetail(ev.holdings_detail);
     let detail = '';
     if (ev.type === 'INITIAL_SELECTION') {
       detail = `<div>Initial portfolio: <strong>${ev.portfolio.join(', ')}</strong></div>
-                <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}</div>`;
+                <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}</div>
+                ${hdTable}`;
     } else if (ev.type === 'REBALANCE') {
       const exits = ev.exits && ev.exits.length
         ? `<span class="exit">Exit: ${ev.exits.join(', ')}</span>` : '';
@@ -716,9 +839,11 @@ function renderEvents(data) {
       detail = `${exits} ${entries}
                 <div>Portfolio: ${ev.portfolio.join(', ')}</div>
                 <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}
-                ${ev.txn_cost ? ' (cost: ₹' + ev.txn_cost.toLocaleString('en-IN') + ')' : ''}</div>`;
+                ${ev.txn_cost ? ' (cost: ₹' + ev.txn_cost.toLocaleString('en-IN') + ')' : ''}</div>
+                ${hdTable}`;
     } else {
-      detail = `No changes. Capital: ₹${ev.capital.toLocaleString('en-IN')}`;
+      detail = `No changes. Capital: ₹${ev.capital.toLocaleString('en-IN')}
+               ${hdTable}`;
     }
     item.innerHTML = `
       <div class="event-date">${ev.date}</div>
@@ -739,13 +864,22 @@ function renderMonthlyView(data) {
   document.getElementById('noMonthly').style.display = 'none';
   document.getElementById('monthlyContent').style.display = 'block';
 
-  // Extract month-end data points from equity curve & benchmark
-  const monthlyEq = getMonthEndPoints(data.equity_curve);
-  const monthlyBm = getMonthEndPoints(data.benchmark_curve);
-
-  renderMonthlyChart(monthlyEq, monthlyBm);
+  buildBmSelector('bmSelectorMonthly', data.benchmark_names || [], onMonthlyBmChange);
+  renderMonthlyChartFromData(data);
   populateMonthDropdown(data);
   renderValidationTable(data);
+}
+
+function renderMonthlyChartFromData(data) {
+  const monthlyEq = getMonthEndPoints(data.equity_curve);
+  const bmNames = data.benchmark_names || [];
+  const bmCurves = data.benchmark_curves || {};
+  const selectedBm = getSelectedBm('bmSelectorMonthly', bmNames);
+  const monthlyBms = {};
+  selectedBm.forEach(name => {
+    monthlyBms[name] = getMonthEndPoints(bmCurves[name] || []);
+  });
+  renderMonthlyChart(monthlyEq, monthlyBms, selectedBm, bmNames);
 }
 
 function getMonthEndPoints(curve) {
@@ -758,48 +892,51 @@ function getMonthEndPoints(curve) {
   return Object.values(monthMap).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function renderMonthlyChart(monthlyEq, monthlyBm) {
+function renderMonthlyChart(monthlyEq, monthlyBms, bmNames, allBmNames) {
   const ctx = document.getElementById('monthlyEquityChart').getContext('2d');
   if (monthlyChartInstance) monthlyChartInstance.destroy();
 
   const labels = monthlyEq.map(p => p.date.substring(0, 7));
   const eqData = monthlyEq.map(p => p.value);
-  const bmData = monthlyBm.map(p => p.value);
+
+  const datasets = [
+    {
+      label: 'Portfolio (Monthly)',
+      data: eqData,
+      borderColor: '#6366f1',
+      backgroundColor: 'rgba(99,102,241,0.15)',
+      fill: true,
+      pointRadius: 4,
+      pointBackgroundColor: '#6366f1',
+      borderWidth: 2.5,
+      tension: 0.2,
+    },
+  ];
+
+  bmNames.forEach(name => {
+    const idx = (allBmNames || bmNames).indexOf(name);
+    const pts = monthlyBms[name] || [];
+    datasets.push({
+      label: name,
+      data: pts.map(p => p.value),
+      borderColor: BM_COLORS[idx % BM_COLORS.length],
+      borderDash: BM_DASHES[idx % BM_DASHES.length],
+      pointRadius: 3,
+      pointBackgroundColor: BM_COLORS[idx % BM_COLORS.length],
+      borderWidth: 1.5,
+      tension: 0.2,
+    });
+  });
 
   monthlyChartInstance = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Portfolio (Monthly)',
-          data: eqData,
-          borderColor: '#6366f1',
-          backgroundColor: 'rgba(99,102,241,0.15)',
-          fill: true,
-          pointRadius: 4,
-          pointBackgroundColor: '#6366f1',
-          borderWidth: 2.5,
-          tension: 0.2,
-        },
-        {
-          label: 'Nifty 50 Benchmark (Monthly)',
-          data: bmData,
-          borderColor: '#8b8fa3',
-          borderDash: [5, 3],
-          pointRadius: 3,
-          pointBackgroundColor: '#8b8fa3',
-          borderWidth: 1.5,
-          tension: 0.2,
-        },
-      ],
-    },
+    data: { labels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { color: '#8b8fa3', font: { size: 12 } } },
+        legend: { labels: { color: '#8b8fa3', font: { size: 11 } } },
         tooltip: {
           backgroundColor: '#1a1d29',
           titleColor: '#e1e4ea',
@@ -871,12 +1008,15 @@ function renderMonthDetail(data, ym) {
   let activeRankings = {};
   let capitalAtMonth = null;
 
+  let activeHoldingsDetail = {};
+
   data.events.forEach(ev => {
     const evYm = ev.date.substring(0, 7);
     if (evYm <= ym) {
       if (ev.portfolio) activePortfolio = [...ev.portfolio];
       if (ev.weights) activeWeights = { ...ev.weights };
       if (ev.rankings) activeRankings = { ...ev.rankings };
+      if (ev.holdings_detail) activeHoldingsDetail = { ...ev.holdings_detail };
       if (ev.capital !== undefined) capitalAtMonth = ev.capital;
     }
   });
@@ -897,10 +1037,16 @@ function renderMonthDetail(data, ym) {
   activePortfolio.forEach((etf, i) => {
     const tr = document.createElement('tr');
     const wt = activeWeights[etf] ? (activeWeights[etf] * 100).toFixed(1) + '%' : '-';
+    const h = activeHoldingsDetail[etf] || {};
     const rank = activeRankings[etf] || '-';
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'positive' : 'negative';
     tr.innerHTML = `
       <td>${i + 1}</td>
       <td><strong>${etf}</strong></td>
+      <td>${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td>₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td class="${pnlCls}">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
       <td>${wt}</td>
       <td>${rank}</td>
     `;
@@ -979,6 +1125,19 @@ function renderValidationTable(data) {
   const summary = data.monthly_summary;
   if (!summary || !summary.length) return;
 
+  const bmNames = data.benchmark_names || [];
+
+  // Build dynamic header
+  const thead = document.getElementById('validationTableHead');
+  let headHtml = `<th>Month</th><th>Open (₹)</th><th>Close (₹)</th>
+    <th>High (₹)</th><th>Low (₹)</th><th>Month Ret%</th><th>Cumul. Ret%</th>`;
+  bmNames.forEach(name => {
+    headHtml += `<th>${name} %</th>`;
+  });
+  headHtml += `<th>Alpha%</th><th>DD from Peak%</th><th>Peak (₹)</th>
+    <th>Days</th><th>Rebal</th><th>Exits</th><th>Entries</th><th>Txn Cost (₹)</th><th>Portfolio</th>`;
+  thead.innerHTML = headHtml;
+
   const tbody = document.querySelector('#validationTable tbody');
   tbody.innerHTML = '';
 
@@ -988,8 +1147,15 @@ function renderValidationTable(data) {
     const retCls = row.return_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
     const cumCls = row.cumulative_return_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
     const alphaCls = row.alpha_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-    const bmCls = row.benchmark_return_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
     const ddCls = row.drawdown_from_peak_pct > 0 ? 'color:var(--red)' : '';
+
+    let bmCells = '';
+    const bmReturns = row.benchmark_returns || {};
+    bmNames.forEach(name => {
+      const val = bmReturns[name] || 0;
+      const cls = val >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+      bmCells += `<td style="${cls}">${val >= 0 ? '+' : ''}${val}%</td>`;
+    });
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -1000,7 +1166,7 @@ function renderValidationTable(data) {
       <td>₹${row.low.toLocaleString('en-IN')}</td>
       <td style="${retCls};font-weight:600">${row.return_pct >= 0 ? '+' : ''}${row.return_pct}%</td>
       <td style="${cumCls}">${row.cumulative_return_pct >= 0 ? '+' : ''}${row.cumulative_return_pct}%</td>
-      <td style="${bmCls}">${row.benchmark_return_pct >= 0 ? '+' : ''}${row.benchmark_return_pct}%</td>
+      ${bmCells}
       <td style="${alphaCls};font-weight:600">${row.alpha_pct >= 0 ? '+' : ''}${row.alpha_pct}%</td>
       <td style="${ddCls}">${row.drawdown_from_peak_pct > 0 ? '-' : ''}${row.drawdown_from_peak_pct}%</td>
       <td>₹${row.peak_value.toLocaleString('en-IN')}</td>

@@ -4,17 +4,17 @@ Momentum Engine: ETF Selection, Rebalancing, and Backtest Simulation.
 
 import math
 from datetime import datetime, timedelta
-from etf_data import ETF_UNIVERSE, generate_synthetic_prices, generate_benchmark_prices, generate_trading_days
+from etf_data import ETF_UNIVERSE, BENCHMARKS, download_all_data
 
 
 class MomentumEngine:
     """Core engine for momentum-based ETF selection, rebalancing, and backtesting."""
 
     def __init__(self):
-        self.prices = generate_synthetic_prices()
-        self.benchmark_prices = generate_benchmark_prices()
-        self.trading_days = generate_trading_days("2022-01-01", "2026-04-18")
+        self.prices, self.benchmark_prices, self.trading_days = download_all_data()
         self.etf_meta = {e["scrip"]: e for e in ETF_UNIVERSE}
+        # Primary benchmark for beta calculation
+        self._primary_bm = "Nifty 50"
 
     # ── Indicator Helpers ─────────────────────────────────────────────────
 
@@ -57,17 +57,18 @@ class MomentumEngine:
 
     def has_history(self, ticker: str, date: str, lookback: int) -> bool:
         series = self._get_price_series(ticker, date, lookback)
-        return len(series) >= lookback
+        # Allow up to 5% missing data points (holidays / gaps)
+        return len(series) >= lookback * 0.95
 
     def return_over(self, ticker: str, date: str, window: int) -> float | None:
         series = self._get_price_series(ticker, date, window + 1)
-        if len(series) < window + 1:
+        if len(series) < (window + 1) * 0.95:
             return None
         return (series[-1] / series[0]) - 1.0
 
     def ema200(self, ticker: str, date: str) -> float | None:
         series = self._get_price_series(ticker, date, 200)
-        if len(series) < 200:
+        if len(series) < 200 * 0.95:
             return None
         k = 2 / (200 + 1)
         ema = series[0]
@@ -77,7 +78,7 @@ class MomentumEngine:
 
     def sharpe_return(self, ticker: str, date: str, window: int = 252) -> float | None:
         series = self._get_price_series(ticker, date, window + 1)
-        if len(series) < window + 1:
+        if len(series) < (window + 1) * 0.95:
             return None
         daily_returns = [(series[i] / series[i - 1]) - 1 for i in range(1, len(series))]
         if not daily_returns:
@@ -89,7 +90,7 @@ class MomentumEngine:
 
     def rsi(self, ticker: str, date: str, period: int = 14) -> float | None:
         series = self._get_price_series(ticker, date, period + 1)
-        if len(series) < period + 1:
+        if len(series) < (period + 1) * 0.95:
             return None
         gains, losses = [], []
         for i in range(1, len(series)):
@@ -105,7 +106,7 @@ class MomentumEngine:
 
     def volatility(self, ticker: str, date: str, window: int = 252) -> float | None:
         series = self._get_price_series(ticker, date, window + 1)
-        if len(series) < window + 1:
+        if len(series) < (window + 1) * 0.95:
             return None
         daily_returns = [(series[i] / series[i - 1]) - 1 for i in range(1, len(series))]
         mean_r = sum(daily_returns) / len(daily_returns)
@@ -164,14 +165,16 @@ class MomentumEngine:
     # ── Rebalancing ───────────────────────────────────────────────────────
 
     def rebalance(self, portfolio: list, date: str, timeframes: list,
-                  weights: list, ema_filter: bool) -> dict:
+                  weights: list, ema_filter: bool, exit_rank: int = 0) -> dict:
         """
         Rebalance portfolio on given date.
+        exit_rank: rank threshold above which an ETF is exited. 0 = auto (2x portfolio size).
         Returns dict with new_portfolio, exits, entries, weights, rankings.
         """
         ranked = self.rank_universe(date, timeframes, weights, ema_filter)
         rank_map = {ticker: i + 1 for i, (ticker, *_) in enumerate(ranked)}
-        exit_rank = 2 * len(portfolio)
+        if exit_rank <= 0:
+            exit_rank = 2 * len(portfolio)
 
         exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > exit_rank]
         replacements = []
@@ -262,6 +265,7 @@ class MomentumEngine:
         rebal_day = config.get("rebal_day", 1)
         initial_capital = config.get("initial_capital", 1000000)
         txn_cost_pct = config.get("transaction_cost_pct", 0.0)
+        exit_rank_threshold = config.get("exit_rank", 0)
 
         # Need enough history before start
         max_tf = max(timeframes)
@@ -281,87 +285,173 @@ class MomentumEngine:
         if not portfolio:
             return {"error": "No ETFs pass filters on start date"}
 
-        w = 1.0 / len(portfolio)
-        holdings = {etf: w for etf in portfolio}
-
         # Rebalancing dates
         rebal_dates = set(self._get_rebalancing_dates(actual_start, end_date,
                                                        frequency, rebal_day))
 
-        # Track performance
+        # ── Unit-based portfolio tracking ─────────────────────────────────
         capital = initial_capital
+        alloc_per_etf = capital / len(portfolio)
+        units = {}       # {etf: number_of_units}
+        buy_prices = {}  # {etf: price_at_purchase}
+        buy_dates = {}   # {etf: date_of_purchase}
+        for etf in portfolio:
+            bp = self._get_price(etf, actual_start)
+            units[etf] = alloc_per_etf / bp if bp and bp > 0 else 0
+            buy_prices[etf] = bp or 0
+            buy_dates[etf] = actual_start
+
+        def _build_holdings_detail(day):
+            """Per-ETF detail: units, buy price, current price, invested, current value, P&L%."""
+            detail = {}
+            for etf_t in units:
+                cp = self._get_price(etf_t, day) or 0
+                invested = round(units[etf_t] * buy_prices.get(etf_t, 0), 2)
+                current_val = round(units[etf_t] * cp, 2)
+                pnl = round(((cp / buy_prices[etf_t]) - 1) * 100, 2) if buy_prices.get(etf_t, 0) > 0 else 0
+                detail[etf_t] = {
+                    "units": round(units[etf_t], 4),
+                    "buy_price": round(buy_prices.get(etf_t, 0), 2),
+                    "buy_date": buy_dates.get(etf_t, ""),
+                    "current_price": round(cp, 2),
+                    "invested": invested,
+                    "current_value": current_val,
+                    "pnl_pct": pnl,
+                }
+            return detail
+
+        def _compute_weights():
+            """Derive current weights from unit values."""
+            if not units:
+                return {}
+            vals = {}
+            total = 0
+            for etf_t in units:
+                # use last known price
+                cp = self._get_price(etf_t, self.trading_days[min(i, len(self.trading_days) - 1)]) or 0
+                v = units[etf_t] * cp
+                vals[etf_t] = v
+                total += v
+            return {etf_t: round(v / total, 4) if total > 0 else 0 for etf_t, v in vals.items()}
+
         events = []
         equity_curve = []
-        benchmark_curve = []
+        benchmark_curves = {name: [] for name in self.benchmark_prices}
         daily_returns_list = []
 
+        w_init = 1.0 / len(portfolio)
         events.append({
             "date": actual_start,
             "type": "INITIAL_SELECTION",
             "portfolio": list(portfolio),
-            "weights": {etf: round(w, 4) for etf in portfolio},
+            "weights": {etf: round(w_init, 4) for etf in portfolio},
+            "holdings_detail": _build_holdings_detail(actual_start),
             "capital": round(capital, 2),
         })
 
-        # Get benchmark start price
-        bench_start_price = self.benchmark_prices.get(actual_start, 17000)
         start_idx = self.trading_days.index(actual_start)
         end_idx = self._date_index(end_date)
         if end_idx is None:
             end_idx = len(self.trading_days) - 1
+
+        # Get benchmark start prices for each benchmark
+        bench_start_prices = {}
+        for bm_name, bm_data in self.benchmark_prices.items():
+            bp = None
+            # Look backward from start for a price
+            for j in range(start_idx, -1, -1):
+                bp = bm_data.get(self.trading_days[j])
+                if bp is not None:
+                    break
+            if bp is None:
+                # Benchmark has no data before start — use its first available price
+                for j in range(start_idx + 1, end_idx + 1):
+                    bp = bm_data.get(self.trading_days[j])
+                    if bp is not None:
+                        break
+            bench_start_prices[bm_name] = bp if bp is not None else 1.0
 
         prev_portfolio_value = capital
 
         for i in range(start_idx, end_idx + 1):
             day = self.trading_days[i]
 
-            # Calculate portfolio value
-            port_return = 0.0
+            # Calculate portfolio value from actual units held
+            portfolio_value = sum(
+                units.get(etf, 0) * (self._get_price(etf, day) or 0)
+                for etf in units
+            )
             if i > start_idx:
-                prev_day = self.trading_days[i - 1]
-                for etf, weight in holdings.items():
-                    p_today = self._get_price(etf, day)
-                    p_prev = self._get_price(etf, prev_day)
-                    if p_today and p_prev and p_prev > 0:
-                        port_return += weight * ((p_today / p_prev) - 1)
-                capital *= (1 + port_return)
+                port_return = (portfolio_value / prev_portfolio_value - 1) if prev_portfolio_value > 0 else 0
+                capital = portfolio_value
+            else:
+                port_return = 0
 
             daily_returns_list.append(port_return)
 
-            bench_price = self.benchmark_prices.get(day, bench_start_price)
             equity_curve.append({"date": day, "value": round(capital, 2)})
-            benchmark_curve.append({
-                "date": day,
-                "value": round(initial_capital * bench_price / bench_start_price, 2)
-            })
+            for bm_name, bm_data in self.benchmark_prices.items():
+                bp_now = bm_data.get(day, bench_start_prices[bm_name])
+                benchmark_curves[bm_name].append({
+                    "date": day,
+                    "value": round(initial_capital * bp_now / bench_start_prices[bm_name], 2)
+                })
 
             # Rebalance check
             if day in rebal_dates and day != actual_start:
-                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter)
+                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold)
                 if result["exits"] or result["entries"]:
-                    # Apply transaction cost
-                    turnover = len(result["exits"]) * (1.0 / len(portfolio)) * 2
-                    cost = capital * turnover * txn_cost_pct / 100.0
-                    capital -= cost
+                    # Only transfer capital from exited ETFs to new entries
+                    exit_value = sum(
+                        units.get(etf, 0) * (self._get_price(etf, day) or 0)
+                        for etf in result["exits"]
+                    )
+                    # Apply transaction cost on the swapped amount
+                    cost = exit_value * txn_cost_pct / 100.0
+                    exit_pool = exit_value - cost
+
+                    # Remove exited ETFs from holdings
+                    for etf in result["exits"]:
+                        units.pop(etf, None)
+                        buy_prices.pop(etf, None)
+                        buy_dates.pop(etf, None)
+
+                    # Allocate exit pool equally among new entries
+                    n_entries = len(result["entries"])
+                    if n_entries > 0 and exit_pool > 0:
+                        alloc_each = exit_pool / n_entries
+                        for etf in result["entries"]:
+                            bp_r = self._get_price(etf, day)
+                            units[etf] = alloc_each / bp_r if bp_r and bp_r > 0 else 0
+                            buy_prices[etf] = bp_r or 0
+                            buy_dates[etf] = day
 
                     portfolio = result["new_portfolio"]
-                    holdings = result["weights"]
+                    # Recalculate total capital after swap
+                    capital = sum(
+                        units.get(etf, 0) * (self._get_price(etf, day) or 0)
+                        for etf in portfolio
+                    )
+
                     events.append({
                         "date": day,
                         "type": "REBALANCE",
                         "exits": result["exits"],
                         "entries": result["entries"],
                         "portfolio": result["new_portfolio"],
-                        "weights": {k: round(v, 4) for k, v in result["weights"].items()},
+                        "weights": _compute_weights(),
+                        "holdings_detail": _build_holdings_detail(day),
                         "rankings": result["rankings"],
                         "capital": round(capital, 2),
                         "txn_cost": round(cost, 2),
+                        "exit_value": round(exit_value, 2),
                     })
                 else:
                     events.append({
                         "date": day,
                         "type": "REBALANCE_NO_CHANGE",
                         "portfolio": list(portfolio),
+                        "holdings_detail": _build_holdings_detail(day),
                         "capital": round(capital, 2),
                     })
 
@@ -400,7 +490,8 @@ class MomentumEngine:
         # Annualised Volatility
         ann_vol = std_r * math.sqrt(252) if daily_returns_list else 0
 
-        # Beta vs benchmark
+        # Beta vs primary benchmark (Nifty 50)
+        primary_bm_data = self.benchmark_prices.get(self._primary_bm, {})
         bench_returns = []
         for i in range(start_idx, end_idx + 1):
             if i == start_idx:
@@ -408,8 +499,8 @@ class MomentumEngine:
                 continue
             day = self.trading_days[i]
             prev_day = self.trading_days[i - 1]
-            bp = self.benchmark_prices.get(day, 0)
-            bp_prev = self.benchmark_prices.get(prev_day, 0)
+            bp = primary_bm_data.get(day, 0)
+            bp_prev = primary_bm_data.get(prev_day, 0)
             if bp_prev > 0:
                 bench_returns.append((bp / bp_prev) - 1)
             else:
@@ -440,13 +531,61 @@ class MomentumEngine:
 
         # Current indicators for universe
         final_date = self.trading_days[end_idx]
+
+        # Compute final holdings detail from actual units
+        final_holdings_detail = {}
+        final_total_value = 0
+        for etf in portfolio:
+            cp = self._get_price(etf, final_date) or 0
+            cv = units.get(etf, 0) * cp
+            final_total_value += cv
+        final_weights = {}
+        for etf in portfolio:
+            cp = self._get_price(etf, final_date) or 0
+            cv = units.get(etf, 0) * cp
+            invested = units.get(etf, 0) * buy_prices.get(etf, 0)
+            pnl = round(((cp / buy_prices[etf]) - 1) * 100, 2) if buy_prices.get(etf, 0) > 0 else 0
+            final_weights[etf] = round(cv / final_total_value, 4) if final_total_value > 0 else 0
+            final_holdings_detail[etf] = {
+                "units": round(units.get(etf, 0), 4),
+                "buy_price": round(buy_prices.get(etf, 0), 2),
+                "buy_date": buy_dates.get(etf, ""),
+                "current_price": round(cp, 2),
+                "invested": round(invested, 2),
+                "current_value": round(cv, 2),
+                "pnl_pct": pnl,
+            }
+
+        # Build universe snapshot for ALL ETFs with available data
         universe_snapshot = []
-        ranked = self.rank_universe(final_date, timeframes, weights, ema_filter)
-        for rank_idx, (ticker, score, sh, mc) in enumerate(ranked):
+        all_etf_scores = []
+        for etf_info in ETF_UNIVERSE:
+            ticker = etf_info["scrip"]
+            close = self._get_price(ticker, final_date)
+            if close is None:
+                continue
             ret_pcts = {}
+            returns_list = []
+            skip_score = False
             for tf in timeframes:
                 r = self.return_over(ticker, final_date, tf)
                 ret_pcts[f"ret_{tf}d"] = round(r * 100, 2) if r is not None else None
+                if r is not None:
+                    returns_list.append(r)
+                else:
+                    skip_score = True
+            score = sum(r * w for r, w in zip(returns_list, weights[:len(returns_list)])) if returns_list else 0
+            sh = self.sharpe_return(ticker, final_date) or 0
+            all_etf_scores.append((ticker, score, sh, skip_score, ret_pcts))
+
+        # Sort: full-data ETFs first by score desc, then partial-data
+        full = [(t, s, sh, skip, rp) for t, s, sh, skip, rp in all_etf_scores if not skip]
+        partial = [(t, s, sh, skip, rp) for t, s, sh, skip, rp in all_etf_scores if skip]
+        full.sort(key=lambda x: -x[1])
+        partial.sort(key=lambda x: -x[1])
+        ranked_all = full + partial
+
+        for rank_idx, (ticker, score, sh, skip, ret_pcts) in enumerate(ranked_all):
             universe_snapshot.append({
                 "rank": rank_idx + 1,
                 "scrip": ticker,
@@ -461,7 +600,7 @@ class MomentumEngine:
 
         # ── Monthly Validation Summary ────────────────────────────────────
         monthly_summary = self._build_monthly_summary(
-            equity_curve, benchmark_curve, events, initial_capital
+            equity_curve, benchmark_curves, events, initial_capital
         )
 
         return {
@@ -475,18 +614,22 @@ class MomentumEngine:
                 "frequency": frequency,
                 "rebal_day": rebal_day,
                 "txn_cost_pct": txn_cost_pct,
+                "exit_rank": exit_rank_threshold,
             },
             "metrics": metrics,
             "equity_curve": equity_curve,
-            "benchmark_curve": benchmark_curve,
+            "benchmark_curves": benchmark_curves,
+            "benchmark_names": list(benchmark_curves.keys()),
             "events": events,
             "final_portfolio": portfolio,
-            "final_weights": {etf: round(holdings.get(etf, 0), 4) for etf in portfolio},
+            "final_weights": final_weights,
+            "final_holdings_detail": final_holdings_detail,
+            "final_capital": round(capital, 2),
             "universe_snapshot": universe_snapshot,
             "monthly_summary": monthly_summary,
         }
 
-    def _build_monthly_summary(self, equity_curve, benchmark_curve, events,
+    def _build_monthly_summary(self, equity_curve, benchmark_curves, events,
                                 initial_capital):
         """Build a month-by-month validation table from backtest data."""
         # Group equity curve by month
@@ -495,10 +638,13 @@ class MomentumEngine:
             ym = pt["date"][:7]
             eq_by_month.setdefault(ym, []).append(pt)
 
-        bm_by_month = {}
-        for pt in benchmark_curve:
-            ym = pt["date"][:7]
-            bm_by_month.setdefault(ym, []).append(pt)
+        # Group each benchmark curve by month
+        bm_by_month = {}  # {bm_name: {ym: [pts]}}
+        for bm_name, bm_curve in benchmark_curves.items():
+            bm_by_month[bm_name] = {}
+            for pt in bm_curve:
+                ym = pt["date"][:7]
+                bm_by_month[bm_name].setdefault(ym, []).append(pt)
 
         # Group events by month
         ev_by_month = {}
@@ -512,6 +658,8 @@ class MomentumEngine:
             if ev.get("portfolio"):
                 portfolio_state.append((ev["date"], ev["portfolio"]))
 
+        # Primary benchmark name for alpha calc
+        primary = self._primary_bm
         months = sorted(eq_by_month.keys())
         summary = []
         cumulative_return = 0.0
@@ -519,7 +667,6 @@ class MomentumEngine:
 
         for ym in months:
             eq_pts = eq_by_month[ym]
-            bm_pts = bm_by_month.get(ym, [])
 
             month_open = eq_pts[0]["value"]
             month_close = eq_pts[-1]["value"]
@@ -528,10 +675,18 @@ class MomentumEngine:
             month_return_pct = ((month_close - month_open) / month_open * 100) if month_open else 0
             cumulative_return = ((month_close - initial_capital) / initial_capital * 100)
 
-            # Benchmark
-            bm_open = bm_pts[0]["value"] if bm_pts else 0
-            bm_close = bm_pts[-1]["value"] if bm_pts else 0
-            bm_return_pct = ((bm_close - bm_open) / bm_open * 100) if bm_open else 0
+            # Per-benchmark monthly returns
+            bm_returns = {}
+            for bm_name in benchmark_curves:
+                pts = bm_by_month.get(bm_name, {}).get(ym, [])
+                if pts:
+                    bm_o = pts[0]["value"]
+                    bm_c = pts[-1]["value"]
+                    bm_returns[bm_name] = round(((bm_c - bm_o) / bm_o * 100) if bm_o else 0, 2)
+                else:
+                    bm_returns[bm_name] = 0.0
+
+            primary_bm_ret = bm_returns.get(primary, 0.0)
 
             # Drawdown from peak
             if month_close > peak_value:
@@ -566,8 +721,8 @@ class MomentumEngine:
                 "low": round(month_low, 2),
                 "return_pct": round(month_return_pct, 2),
                 "cumulative_return_pct": round(cumulative_return, 2),
-                "benchmark_return_pct": round(bm_return_pct, 2),
-                "alpha_pct": round(month_return_pct - bm_return_pct, 2),
+                "benchmark_returns": bm_returns,
+                "alpha_pct": round(month_return_pct - primary_bm_ret, 2),
                 "drawdown_from_peak_pct": round(dd_from_peak, 2),
                 "peak_value": round(peak_value, 2),
                 "trading_days": trading_days_count,

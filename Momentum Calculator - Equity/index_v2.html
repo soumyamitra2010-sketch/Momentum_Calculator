@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Momentum Stock Calculator V2</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+    --bg: #0f1117; --surface: #1a1d27; --card: #22263a; --border: #2d3348;
+    --text: #e4e6f0; --muted: #8b8fa3; --accent: #4f8cff; --green: #22c55e;
+    --red: #ef4444; --orange: #f59e0b; --purple: #a78bfa;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+.app { max-width: 1400px; margin: 0 auto; padding: 16px; }
+
+/* Header */
+.header { display: flex; align-items: center; justify-content: space-between; padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.header h1 { font-size: 1.5rem; font-weight: 700; }
+.header h1 span { color: var(--accent); }
+.version-badge { background: var(--accent); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+
+/* Survivorship Banner */
+.bias-banner { background: #2d1f00; border: 1px solid var(--orange); border-radius: 8px; padding: 10px 16px; margin-bottom: 16px; font-size: 0.85rem; color: var(--orange); display: none; }
+.bias-banner.visible { display: block; }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+.tab { padding: 8px 18px; border-radius: 8px 8px 0 0; background: var(--surface); color: var(--muted); cursor: pointer; border: 1px solid transparent; font-size: 0.9rem; }
+.tab.active { background: var(--card); color: var(--accent); border-color: var(--border); border-bottom-color: var(--card); font-weight: 600; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Forms */
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.form-group { display: flex; flex-direction: column; gap: 4px; }
+.form-group label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+.form-group input, .form-group select { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; }
+.form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+
+/* Buttons */
+.btn { padding: 10px 24px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; font-size: 0.9rem; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #3d7ae6; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn-actions { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
+
+/* Status bar */
+.status-bar { background: var(--surface); border-radius: 8px; padding: 10px 16px; margin-bottom: 16px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.status-item { display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; }
+.status-dot.ok { background: var(--green); }
+.status-dot.warn { background: var(--orange); }
+.status-dot.err { background: var(--red); }
+
+/* Metric cards */
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.metric-card { background: var(--card); border-radius: 10px; padding: 14px; border: 1px solid var(--border); }
+.metric-card .label { font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+.metric-card .value { font-size: 1.4rem; font-weight: 700; }
+.metric-card .value.positive { color: var(--green); }
+.metric-card .value.negative { color: var(--red); }
+
+/* Chart */
+.chart-container { background: var(--card); border-radius: 10px; padding: 16px; border: 1px solid var(--border); margin-bottom: 20px; }
+.chart-wrap { height: 400px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; background: var(--card); border-radius: 10px; border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+th { background: var(--surface); padding: 10px 12px; text-align: left; font-weight: 600; color: var(--muted); position: sticky; top: 0; }
+td { padding: 8px 12px; border-top: 1px solid var(--border); }
+tr:hover { background: rgba(79, 140, 255, 0.05); }
+.in-portfolio { background: rgba(79, 140, 255, 0.1); }
+.positive { color: var(--green); }
+.negative { color: var(--red); }
+
+/* Sector badge */
+.sector-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; background: var(--surface); color: var(--muted); white-space: nowrap; }
+
+/* Sector concentration bar */
+.sector-bar-wrap { margin-top: 16px; }
+.sector-bar { display: flex; border-radius: 6px; overflow: hidden; height: 28px; margin-bottom: 8px; }
+.sector-bar-segment { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; color: #fff; font-weight: 600; min-width: 20px; }
+.sector-legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 0.78rem; }
+.sector-legend-item { display: flex; align-items: center; gap: 4px; }
+.sector-swatch { width: 12px; height: 12px; border-radius: 3px; }
+
+/* Progress */
+.progress-bar { width: 100%; height: 6px; background: var(--surface); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+.progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+
+/* Loading spinner */
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- Header -->
+<div class="header">
+    <h1><span>Momentum</span> Stock Calculator <span class="version-badge">V2</span></h1>
+    <div style="font-size:0.8rem;color:var(--muted)">Log-Regression × R² | Sector Diversification | DuckDB</div>
+</div>
+
+<!-- Survivorship Bias Banner -->
+<div class="bias-banner" id="biasBanner">
+    ⚠️ <strong>Survivorship Bias:</strong> This backtest uses today's index constituents applied to historical dates.
+    Stocks that were delisted, merged, or dropped from the index are excluded, which may overstate returns.
+</div>
+
+<!-- Status Bar -->
+<div class="status-bar" id="statusBar">
+    <div class="status-item"><span class="status-dot warn" id="statusDot"></span> <span id="statusText">Loading...</span></div>
+    <div class="status-item" id="dataInfo" style="color:var(--muted)"></div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+    <div class="tab active" onclick="switchTab('setup')">Setup</div>
+    <div class="tab" onclick="switchTab('results')">Results</div>
+    <div class="tab" onclick="switchTab('universe')">Universe</div>
+    <div class="tab" onclick="switchTab('events')">Events</div>
+    <div class="tab" onclick="switchTab('monthly')">Monthly</div>
+</div>
+
+<!-- ═══ SETUP TAB ═══ -->
+<div class="tab-content active" id="tab-setup">
+
+    <!-- Data Download Section -->
+    <div style="background:var(--card);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:16px">
+        <h3 style="font-size:1rem;margin-bottom:12px">📡 Data Management</h3>
+        <div class="config-grid">
+            <div class="form-group">
+                <label>Universe</label>
+                <select id="universe" onchange="checkDataStatus()">
+                    <option value="nifty50" selected>Nifty 50 (50 stocks)</option>
+                    <option value="nifty100">Nifty 100 (100 stocks)</option>
+                    <option value="nifty200">Nifty 200 (requires CSV)</option>
+                    <option value="nifty500">Nifty 500 (requires CSV)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>History Start Date</label>
+                <input type="date" id="downloadStart" value="2010-01-01">
+            </div>
+            <div class="form-group" style="justify-content:flex-end">
+                <button class="btn btn-secondary" onclick="downloadData()" id="downloadBtn">Download Data</button>
+            </div>
+        </div>
+        <div id="downloadProgress" style="display:none;margin-top:8px">
+            <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+            <div style="font-size:0.8rem;color:var(--muted)" id="progressText">Downloading...</div>
+        </div>
+    </div>
+
+    <!-- Backtest Configuration -->
+    <div style="background:var(--card);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:16px">
+        <h3 style="font-size:1rem;margin-bottom:12px">⚙️ Backtest Configuration</h3>
+        <div class="config-grid">
+            <div class="form-group">
+                <label>Ranking Method</label>
+                <select id="rankingMethod">
+                    <option value="log_regression" selected>Log-Regression × R² (V2)</option>
+                    <option value="weighted_return">Weighted Return (V1)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Regression Window (days)</label>
+                <input type="number" id="regressionWindow" value="252" min="63" max="504">
+            </div>
+            <div class="form-group">
+                <label>Timeframes (comma-sep)</label>
+                <input type="text" id="timeframes" value="252,126,63">
+            </div>
+            <div class="form-group">
+                <label>Weights (comma-sep)</label>
+                <input type="text" id="weights" value="1,1,1">
+            </div>
+            <div class="form-group">
+                <label>Start Date</label>
+                <input type="date" id="startDate" value="2015-01-01">
+            </div>
+            <div class="form-group">
+                <label>End Date</label>
+                <input type="date" id="endDate" value="2026-04-24">
+            </div>
+            <div class="form-group">
+                <label>Portfolio Size</label>
+                <input type="number" id="portfolioSize" value="10" min="3" max="50">
+            </div>
+            <div class="form-group">
+                <label>Rebalance Frequency</label>
+                <select id="frequency">
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly" selected>Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Rebalance Day</label>
+                <input type="number" id="rebalDay" value="1" min="0" max="60">
+            </div>
+            <div class="form-group">
+                <label>Transaction Cost + Slippage (%)</label>
+                <input type="number" id="txnCost" value="0.5" min="0" max="5" step="0.1">
+            </div>
+            <div class="form-group">
+                <label>Exit Rank (0 = auto 1.5×)</label>
+                <input type="number" id="exitRank" value="0" min="0" max="200">
+            </div>
+            <div class="form-group">
+                <label>200-day EMA Filter</label>
+                <select id="emaFilter">
+                    <option value="false" selected>Off</option>
+                    <option value="true">On — Price &gt; EMA200</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sector Diversification -->
+    <div style="background:var(--card);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:16px">
+        <h3 style="font-size:1rem;margin-bottom:12px">🏗️ Sector Diversification</h3>
+        <div class="config-grid">
+            <div class="form-group">
+                <label>Sector Diversification</label>
+                <select id="sectorDiversification">
+                    <option value="true" selected>On — Skip & Fill</option>
+                    <option value="false">Off — Pure Momentum</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Max Sector Weight (%)</label>
+                <input type="number" id="maxSectorPct" value="25" min="10" max="100" step="5">
+            </div>
+        </div>
+    </div>
+
+    <!-- Investment Plan -->
+    <div style="background:var(--card);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:16px">
+        <h3 style="font-size:1rem;margin-bottom:12px">💰 Investment Plan</h3>
+        <div class="config-grid">
+            <div class="form-group">
+                <label>Plan</label>
+                <select id="investmentPlan" onchange="togglePlanFields()">
+                    <option value="onetime" selected>One Time Investment</option>
+                    <option value="sip">SIP (Monthly)</option>
+                    <option value="both">Both (Lump Sum + SIP)</option>
+                </select>
+            </div>
+            <div class="form-group" id="initialCapitalGroup">
+                <label>Initial Capital (₹)</label>
+                <input type="number" id="initialCapital" value="1000000" min="10000" step="10000">
+            </div>
+            <div class="form-group" id="sipAmountGroup" style="display:none">
+                <label>SIP Amount per Month (₹)</label>
+                <input type="number" id="sipAmount" value="50000" min="1000" step="1000">
+            </div>
+        </div>
+    </div>
+
+    <div class="btn-actions">
+        <button class="btn btn-primary" onclick="runBacktest()" id="backtestBtn">Run Backtest</button>
+        <span id="backtestStatus" style="font-size:0.85rem;color:var(--muted)"></span>
+    </div>
+</div>
+
+<!-- ═══ RESULTS TAB ═══ -->
+<div class="tab-content" id="tab-results">
+    <div id="noResults" style="padding:40px;text-align:center;color:var(--muted)">
+        Run a backtest to see results.
+    </div>
+    <div id="resultsContent" style="display:none">
+        <div class="metrics-grid" id="metricsGrid"></div>
+
+        <!-- Sector Concentration -->
+        <div class="chart-container">
+            <h3 style="font-size:0.95rem;margin-bottom:12px">Sector Concentration</h3>
+            <div class="sector-bar-wrap" id="sectorBarWrap"></div>
+        </div>
+
+        <!-- Equity Curve -->
+        <div class="chart-container">
+            <h3 style="font-size:0.95rem;margin-bottom:8px">Equity Curve</h3>
+            <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+        </div>
+
+        <!-- Holdings -->
+        <div class="table-wrap" style="margin-bottom:16px">
+            <table id="holdingsTable"></table>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ UNIVERSE TAB ═══ -->
+<div class="tab-content" id="tab-universe">
+    <div class="table-wrap" style="max-height:600px;overflow-y:auto">
+        <table id="universeTable"></table>
+    </div>
+</div>
+
+<!-- ═══ EVENTS TAB ═══ -->
+<div class="tab-content" id="tab-events">
+    <div class="table-wrap" style="max-height:600px;overflow-y:auto">
+        <table id="eventsTable"></table>
+    </div>
+</div>
+
+<!-- ═══ MONTHLY TAB ═══ -->
+<div class="tab-content" id="tab-monthly">
+    <div class="table-wrap" style="max-height:600px;overflow-y:auto">
+        <table id="monthlyTable"></table>
+    </div>
+</div>
+
+</div>
+
+<script>
+const API = '';
+let lastResult = null;
+let equityChartInstance = null;
+
+// ── Tab Switching ────────────────────────────────────────────────────────
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach((t, i) => {
+        const tabs = ['setup','results','universe','events','monthly'];
+        t.classList.toggle('active', tabs[i] === name);
+    });
+    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ── Investment Plan Toggle ───────────────────────────────────────────────
+function togglePlanFields() {
+    const plan = document.getElementById('investmentPlan').value;
+    document.getElementById('initialCapitalGroup').style.display = (plan === 'sip') ? 'none' : 'flex';
+    document.getElementById('sipAmountGroup').style.display = (plan === 'onetime') ? 'none' : 'flex';
+}
+
+// ── Data Status Check ────────────────────────────────────────────────────
+async function checkDataStatus() {
+    const universe = document.getElementById('universe').value;
+    try {
+        const resp = await fetch(`${API}/api/v2/data/status?universe=${universe}`);
+        const data = await resp.json();
+        const dot = document.getElementById('statusDot');
+        const text = document.getElementById('statusText');
+        const info = document.getElementById('dataInfo');
+
+        if (data.tickers_with_prices > 0) {
+            dot.className = 'status-dot ok';
+            text.textContent = `${data.tickers_with_prices} tickers loaded`;
+            info.textContent = data.date_range ?
+                `${data.date_range[0]} → ${data.date_range[1]} | ${data.total_price_rows.toLocaleString()} rows` :
+                'No date range';
+            if (data.needs_download > 0) {
+                text.textContent += ` (${data.needs_download} need update)`;
+                dot.className = 'status-dot warn';
+            }
+            document.getElementById('biasBanner').classList.add('visible');
+        } else {
+            dot.className = 'status-dot err';
+            text.textContent = 'No data — download required';
+            info.textContent = '';
+        }
+    } catch (e) {
+        document.getElementById('statusDot').className = 'status-dot err';
+        document.getElementById('statusText').textContent = 'Cannot connect to server';
+    }
+}
+
+// ── Data Download ────────────────────────────────────────────────────────
+async function downloadData() {
+    const btn = document.getElementById('downloadBtn');
+    const prog = document.getElementById('downloadProgress');
+    btn.disabled = true;
+    btn.textContent = 'Downloading...';
+    prog.style.display = 'block';
+    document.getElementById('progressFill').style.width = '10%';
+    document.getElementById('progressText').textContent = 'Starting download...';
+
+    try {
+        const resp = await fetch(`${API}/api/v2/data/download`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                universe: document.getElementById('universe').value,
+                start_date: document.getElementById('downloadStart').value,
+            })
+        });
+        const data = await resp.json();
+        document.getElementById('progressFill').style.width = '100%';
+        document.getElementById('progressText').textContent =
+            `Done: ${data.downloaded} downloaded, ${data.skipped} cached` +
+            (data.failed && data.failed.length > 0 ? `, ${data.failed.length} failed` : '');
+        await checkDataStatus();
+        await loadInfo();
+    } catch (e) {
+        document.getElementById('progressText').textContent = 'Download failed: ' + e.message;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Download Data';
+}
+
+// ── Load Info ────────────────────────────────────────────────────────────
+async function loadInfo() {
+    try {
+        const universe = document.getElementById('universe').value;
+        const resp = await fetch(`${API}/api/v2/info?universe=${universe}`);
+        const info = await resp.json();
+        if (info.last_date) {
+            document.getElementById('endDate').value = info.last_date;
+        }
+    } catch (e) {}
+}
+
+// ── Run Backtest ─────────────────────────────────────────────────────────
+async function runBacktest() {
+    const btn = document.getElementById('backtestBtn');
+    const status = document.getElementById('backtestStatus');
+    btn.disabled = true;
+    status.innerHTML = '<span class="spinner"></span> Running backtest...';
+
+    const plan = document.getElementById('investmentPlan').value;
+
+    const config = {
+        universe: document.getElementById('universe').value,
+        ranking_method: document.getElementById('rankingMethod').value,
+        regression_window: parseInt(document.getElementById('regressionWindow').value),
+        timeframes: document.getElementById('timeframes').value.split(',').map(Number),
+        weights: document.getElementById('weights').value.split(',').map(Number),
+        ema_filter: document.getElementById('emaFilter').value === 'true',
+        portfolio_size: parseInt(document.getElementById('portfolioSize').value),
+        start_date: document.getElementById('startDate').value,
+        end_date: document.getElementById('endDate').value,
+        frequency: document.getElementById('frequency').value,
+        rebal_day: parseInt(document.getElementById('rebalDay').value),
+        transaction_cost_pct: parseFloat(document.getElementById('txnCost').value),
+        exit_rank: parseInt(document.getElementById('exitRank').value),
+        sector_diversification: document.getElementById('sectorDiversification').value === 'true',
+        max_sector_pct: parseInt(document.getElementById('maxSectorPct').value) / 100,
+        investment_plan: plan,
+        initial_capital: plan === 'sip' ? 0 : parseFloat(document.getElementById('initialCapital').value),
+        sip_amount: plan === 'onetime' ? 0 : parseFloat(document.getElementById('sipAmount').value),
+    };
+
+    try {
+        const resp = await fetch(`${API}/api/v2/backtest`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = '❌ ' + data.error;
+            btn.disabled = false;
+            return;
+        }
+        lastResult = data;
+        renderResults(data);
+        renderUniverse(data.universe_snapshot);
+        renderEvents(data.events);
+        renderMonthly(data.monthly_summary, data.benchmark_names);
+        status.textContent = '✅ Backtest complete';
+        switchTab('results');
+    } catch (e) {
+        status.textContent = '❌ Error: ' + e.message;
+    }
+    btn.disabled = false;
+}
+
+// ── Render Results ───────────────────────────────────────────────────────
+function renderResults(data) {
+    document.getElementById('noResults').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+
+    const m = data.metrics;
+    const plan = m.investment_plan;
+
+    // Determine invested label
+    let investedLabel = 'Initial Capital';
+    let investedValue = m.initial_capital;
+    if (plan === 'sip') { investedLabel = 'Total SIP Invested'; investedValue = m.total_invested; }
+    else if (plan === 'both') { investedLabel = 'Total Invested'; investedValue = m.total_invested; }
+
+    const metrics = [
+        { label: investedLabel, value: '₹' + num(investedValue) },
+        { label: 'Final Value', value: '₹' + num(m.final_capital), cls: m.final_capital >= investedValue ? 'positive' : 'negative' },
+        { label: 'Total Return', value: m.total_return + '%', cls: m.total_return >= 0 ? 'positive' : 'negative' },
+        { label: 'CAGR', value: m.cagr + '%', cls: m.cagr >= 0 ? 'positive' : 'negative' },
+        { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2) },
+        { label: 'Max Drawdown', value: m.max_drawdown + '%', cls: 'negative' },
+        { label: 'Win Rate', value: m.win_rate + '%' },
+        { label: 'Ann. Volatility', value: m.annualised_volatility + '%' },
+        { label: 'Beta', value: m.beta.toFixed(2) },
+        { label: 'Total Trades', value: m.total_trades },
+    ];
+
+    const grid = document.getElementById('metricsGrid');
+    grid.innerHTML = metrics.map(m =>
+        `<div class="metric-card"><div class="label">${m.label}</div><div class="value ${m.cls||''}">${m.value}</div></div>`
+    ).join('');
+
+    // Sector concentration bar
+    renderSectorBar(m.sector_concentration || {});
+
+    // Equity chart
+    renderEquityChart(data);
+
+    // Holdings table
+    renderHoldings(data);
+}
+
+function renderSectorBar(sectorConc) {
+    const wrap = document.getElementById('sectorBarWrap');
+    const sectors = Object.entries(sectorConc).sort((a,b) => b[1] - a[1]);
+    if (!sectors.length) { wrap.innerHTML = ''; return; }
+
+    const colors = ['#4f8cff','#22c55e','#f59e0b','#ef4444','#a78bfa','#06b6d4','#ec4899','#84cc16','#f97316','#6366f1','#14b8a6','#e879f9','#facc15','#fb923c','#67e8f9'];
+
+    let barHtml = '<div class="sector-bar">';
+    let legendHtml = '<div class="sector-legend">';
+    sectors.forEach(([sector, pct], i) => {
+        const color = colors[i % colors.length];
+        barHtml += `<div class="sector-bar-segment" style="width:${Math.max(pct,2)}%;background:${color}" title="${sector}: ${pct}%">${pct > 8 ? pct+'%' : ''}</div>`;
+        legendHtml += `<div class="sector-legend-item"><div class="sector-swatch" style="background:${color}"></div>${sector} (${pct}%)</div>`;
+    });
+    barHtml += '</div>';
+    legendHtml += '</div>';
+    wrap.innerHTML = barHtml + legendHtml;
+}
+
+function renderEquityChart(data) {
+    const ctx = document.getElementById('equityChart').getContext('2d');
+    if (equityChartInstance) equityChartInstance.destroy();
+
+    const datasets = [{
+        label: 'Portfolio',
+        data: data.equity_curve.map(p => ({x: p.date, y: p.value})),
+        borderColor: '#4f8cff', borderWidth: 2, pointRadius: 0, fill: false,
+    }];
+
+    const bmColors = ['#f59e0b','#22c55e','#a78bfa','#ef4444','#06b6d4'];
+    let ci = 0;
+    for (const [name, curve] of Object.entries(data.benchmark_curves)) {
+        if (curve.length > 0) {
+            datasets.push({
+                label: name,
+                data: curve.map(p => ({x: p.date, y: p.value})),
+                borderColor: bmColors[ci % bmColors.length],
+                borderWidth: 1.5, borderDash: [4, 2], pointRadius: 0, fill: false,
+            });
+            ci++;
+        }
+    }
+
+    equityChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: { datasets },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            scales: {
+                x: { type: 'category', ticks: { maxTicksLimit: 15, color: '#8b8fa3' }, grid: { color: '#2d3348' } },
+                y: { ticks: { color: '#8b8fa3', callback: v => '₹'+num(v) }, grid: { color: '#2d3348' } },
+            },
+            plugins: {
+                legend: { labels: { color: '#e4e6f0' } },
+                tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ₹' + num(ctx.parsed.y) } },
+            },
+        },
+    });
+}
+
+function renderHoldings(data) {
+    const detail = data.final_holdings_detail;
+    if (!detail || !Object.keys(detail).length) return;
+
+    let html = '<thead><tr><th>Stock</th><th>Sector</th><th>Units</th><th>Buy Price</th><th>Current</th><th>Invested</th><th>Value</th><th>P&L%</th></tr></thead><tbody>';
+    for (const [ticker, h] of Object.entries(detail)) {
+        const cls = h.pnl_pct >= 0 ? 'positive' : 'negative';
+        html += `<tr><td><strong>${ticker}</strong></td><td><span class="sector-badge">${h.sector||''}</span></td><td>${h.units}</td><td>₹${num(h.buy_price)}</td><td>₹${num(h.current_price)}</td><td>₹${num(h.invested)}</td><td>₹${num(h.current_value)}</td><td class="${cls}">${h.pnl_pct}%</td></tr>`;
+    }
+    html += '</tbody>';
+    document.getElementById('holdingsTable').innerHTML = html;
+}
+
+// ── Render Universe ──────────────────────────────────────────────────────
+function renderUniverse(snapshot) {
+    if (!snapshot || !snapshot.length) return;
+    let html = '<thead><tr><th>#</th><th>Ticker</th><th>Name</th><th>Sector</th><th>Score</th><th>Ann. Return</th><th>R²</th><th>Sharpe</th><th>Vol%</th><th>RSI</th><th>Close</th></tr></thead><tbody>';
+    for (const s of snapshot) {
+        const cls = s.in_portfolio ? 'in-portfolio' : '';
+        const scoreCls = s.score >= 0 ? 'positive' : 'negative';
+        html += `<tr class="${cls}"><td>${s.rank}</td><td><strong>${s.ticker}</strong></td><td>${s.name||''}</td><td><span class="sector-badge">${s.sector}</span></td><td class="${scoreCls}">${s.score}</td><td class="${s.annualized_return>=0?'positive':'negative'}">${s.annualized_return}%</td><td>${s.r_squared}</td><td>${s.sharpe}</td><td>${s.volatility}</td><td>${s.rsi}</td><td>₹${s.close}</td></tr>`;
+    }
+    html += '</tbody>';
+    document.getElementById('universeTable').innerHTML = html;
+}
+
+// ── Render Events ────────────────────────────────────────────────────────
+function renderEvents(events) {
+    if (!events || !events.length) return;
+    let html = '<thead><tr><th>Date</th><th>Type</th><th>Portfolio</th><th>Exits</th><th>Entries</th><th>Capital</th><th>SIP</th><th>Txn Cost</th></tr></thead><tbody>';
+    for (const e of events) {
+        const pf = (e.portfolio || []).join(', ');
+        const exits = (e.exits || []).join(', ') || '—';
+        const entries = (e.entries || []).join(', ') || '—';
+        const sip = e.sip_invested ? '₹' + num(e.sip_invested) : '—';
+        const txn = e.txn_cost ? '₹' + num(e.txn_cost) : '—';
+        const typeCls = e.type === 'REBALANCE' ? 'color:var(--accent)' : e.type === 'SIP_INVESTMENT' ? 'color:var(--green)' : '';
+        html += `<tr><td>${e.date}</td><td style="${typeCls}">${e.type}</td><td style="font-size:0.75rem;max-width:300px">${pf}</td><td class="negative">${exits}</td><td class="positive">${entries}</td><td>₹${num(e.capital)}</td><td>${sip}</td><td>${txn}</td></tr>`;
+    }
+    html += '</tbody>';
+    document.getElementById('eventsTable').innerHTML = html;
+}
+
+// ── Render Monthly ───────────────────────────────────────────────────────
+function renderMonthly(summary, bmNames) {
+    if (!summary || !summary.length) return;
+    let bmHeaders = (bmNames || []).map(n => `<th>${n}</th>`).join('');
+    let html = `<thead><tr><th>Month</th><th>Open</th><th>Close</th><th>Return%</th><th>Cum.Ret%</th>${bmHeaders}<th>Alpha%</th><th>DD%</th><th>Rebal</th><th>Exits</th><th>Entries</th></tr></thead><tbody>`;
+    for (const m of summary) {
+        const retCls = m.return_pct >= 0 ? 'positive' : 'negative';
+        const alphaCls = m.alpha_pct >= 0 ? 'positive' : 'negative';
+        let bmCells = '';
+        for (const bn of (bmNames || [])) {
+            const bret = (m.benchmark_returns || {})[bn] || 0;
+            bmCells += `<td class="${bret >= 0 ? 'positive' : 'negative'}">${bret}%</td>`;
+        }
+        html += `<tr><td>${m.month}</td><td>₹${num(m.open)}</td><td>₹${num(m.close)}</td><td class="${retCls}">${m.return_pct}%</td><td>${m.cumulative_return_pct}%</td>${bmCells}<td class="${alphaCls}">${m.alpha_pct}%</td><td class="negative">${m.drawdown_from_peak_pct}%</td><td>${m.rebalances}</td><td>${(m.exits||[]).join(', ')||'—'}</td><td>${(m.entries||[]).join(', ')||'—'}</td></tr>`;
+    }
+    html += '</tbody>';
+    document.getElementById('monthlyTable').innerHTML = html;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+function num(v) { return Number(v||0).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
+
+// ── Init ─────────────────────────────────────────────────────────────────
+checkDataStatus();
+loadInfo();
+</script>
+</body>
+</html>

@@ -83,7 +83,7 @@ def get_rankings():
         })
     return jsonify(result)
 
-
+# print hello
 @app.route("/api/info", methods=["GET"])
 def get_info():
     """Return available date range and metadata."""

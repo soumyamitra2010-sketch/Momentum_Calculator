@@ -4,7 +4,7 @@ Momentum Engine: ETF Selection, Rebalancing, and Backtest Simulation.
 
 import math
 from datetime import datetime, timedelta
-from etf_data import ETF_UNIVERSE, BENCHMARKS, download_all_data
+from etf_data import ETF_UNIVERSE, BENCHMARKS, download_all_data, ALL_ETF_UNIVERSE
 
 
 class MomentumEngine:
@@ -12,14 +12,33 @@ class MomentumEngine:
 
     def __init__(self):
         self.prices, self.benchmark_prices, self.trading_days = download_all_data()
+        # Build etf_meta from both default and ALL_ETF_UNIVERSE for custom universe support
         self.etf_meta = {e["scrip"]: e for e in ETF_UNIVERSE}
+        all_etf_meta = {e["scrip"]: e for e in ALL_ETF_UNIVERSE}
+        self.etf_meta.update(all_etf_meta)  # Add any additional ETFs from ALL_ETF_UNIVERSE
         # Primary benchmark for beta calculation
         self._primary_bm = "Nifty 50"
 
     # ── Indicator Helpers ─────────────────────────────────────────────────
 
     def _get_price(self, ticker: str, date: str) -> float | None:
-        return self.prices.get(ticker, {}).get(date)
+        """Get price for ticker on date, forward-filling from previous trading days if missing."""
+        ticker_prices = self.prices.get(ticker, {})
+        if date in ticker_prices:
+            return ticker_prices[date]
+        
+        # Find the most recent trading day with price data
+        idx = self._date_index(date)
+        if idx is None:
+            return None
+        
+        # Look backward from current date to find last available price
+        for i in range(idx, -1, -1):
+            d = self.trading_days[i]
+            if d in ticker_prices:
+                return ticker_prices[d]
+        
+        return None
 
     def _get_price_series(self, ticker: str, end_date: str, lookback: int) -> list:
         """Return up to `lookback` prices ending at or before `end_date`."""
@@ -55,6 +74,19 @@ class MomentumEngine:
             return self.trading_days[idx + 1]
         return None
 
+    def _prev_trading_day(self, date: str) -> str | None:
+        """Get the trading day strictly BEFORE the given date (never the same day)."""
+        idx = self._date_index(date)
+        if idx is None:
+            return None
+        # If date is in trading_days, return the previous trading day
+        if self.trading_days[idx] == date:
+            if idx - 1 >= 0:
+                return self.trading_days[idx - 1]
+            return None
+        # If date is not a trading day, return the nearest prior trading day (which is at idx)
+        return self.trading_days[idx] if idx >= 0 else None
+
     def has_history(self, ticker: str, date: str, lookback: int) -> bool:
         series = self._get_price_series(ticker, date, lookback)
         # Allow up to 5% missing data points (holidays / gaps)
@@ -65,6 +97,119 @@ class MomentumEngine:
         if len(series) < (window + 1) * 0.95:
             return None
         return (series[-1] / series[0]) - 1.0
+
+    # ── RSI Calculation ───────────────────────────────────────────────────
+    
+    def calculate_rsi(self, prices: list, period: int = 14) -> float:
+        """
+        Calculate Relative Strength Index (RSI).
+        prices: list of closing prices (ascending chronological order)
+        period: lookback period (default 14 days)
+        returns: RSI value 0-100
+        """
+        if len(prices) < period + 1:
+            return 50.0  # Default neutral if not enough data
+        
+        # Calculate gains and losses
+        gains = []
+        losses = []
+        
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        
+        # Calculate averages over period
+        avg_gain = sum(gains[-period:]) / period if period > 0 else 0
+        avg_loss = sum(losses[-period:]) / period if period > 0 else 0
+        
+        # Calculate RS and RSI
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        
+        rs = avg_gain / avg_loss if avg_loss > 0 else 0
+        rsi = 100 - (100 / (1 + rs)) if rs >= 0 else 0
+        
+        return rsi
+    
+    def get_rsi_for_ticker(self, ticker: str, date: str, period: int = 14) -> float | None:
+        """
+        Get RSI value for ticker on date.
+        """
+        try:
+            prices = self._get_price_series(ticker, date, period + 1)
+            if len(prices) < period + 1:
+                return None
+            return self.calculate_rsi(prices, period)
+        except Exception as e:
+            print(f"RSI calculation error for {ticker}: {e}")
+            return None
+    
+    # ── Volatility Calculation ────────────────────────────────────────────
+    
+    def calculate_volatility(self, ticker: str, date: str, lookback_days: int = 252) -> float:
+        """
+        Calculate annualized volatility (standard deviation of returns).
+        Returns: annualized volatility as decimal (0.20 = 20%)
+        """
+        try:
+            series = self._get_price_series(ticker, date, lookback_days + 1)
+            if len(series) < 2:
+                return 0.20  # Default 20% if no data
+            
+            # Calculate daily returns
+            returns = []
+            for i in range(1, len(series)):
+                if series[i-1] > 0:
+                    daily_return = (series[i] - series[i-1]) / series[i-1]
+                    returns.append(daily_return)
+            
+            if len(returns) < 2:
+                return 0.20
+            
+            # Calculate standard deviation
+            mean_return = sum(returns) / len(returns)
+            variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+            daily_std = math.sqrt(variance)
+            
+            # Annualize (sqrt(252) trading days)
+            annual_volatility = daily_std * math.sqrt(252)
+            
+            return max(annual_volatility, 0.01)  # Minimum 1% volatility
+        except Exception as e:
+            print(f"Volatility calculation error for {ticker}: {e}")
+            return 0.20
+    
+    def calculate_volatility_weights(self, portfolio: list, date: str) -> dict:
+        """
+        Calculate portfolio weights inversely proportional to volatility (risk parity).
+        Lower volatility = higher weight
+        Returns: dict of {ticker: weight} where weights sum to 1.0
+        """
+        if not portfolio:
+            return {}
+        
+        volatilities = {}
+        for ticker in portfolio:
+            vol = self.calculate_volatility(ticker, date)
+            volatilities[ticker] = vol if vol > 0 else 0.20
+        
+        # Inverse volatility weighting
+        inverse_vols = {ticker: 1.0 / volatilities[ticker] for ticker in portfolio}
+        total_inverse_vol = sum(inverse_vols.values())
+        
+        if total_inverse_vol == 0:
+            # Fallback to equal weighting
+            return {ticker: 1.0 / len(portfolio) for ticker in portfolio}
+        
+        # Normalize to sum to 1.0
+        weights = {ticker: inverse_vols[ticker] / total_inverse_vol for ticker in portfolio}
+        
+        return weights
 
     def ema200(self, ticker: str, date: str) -> float | None:
         series = self._get_price_series(ticker, date, 200)
@@ -115,15 +260,83 @@ class MomentumEngine:
 
     # ── Selection Algorithm ───────────────────────────────────────────────
 
+    def _detect_momentum_reversal(self, returns: list, timeframes: list) -> bool:
+        """
+        Detect momentum reversal pattern:
+        - Long-term (252d) is positive (> 5%)
+        - BUT medium-term (50d) and short-term (20d) are both negative
+        Returns True if reversal detected (potential trend reversal).
+        """
+        if not returns or len(returns) < 3 or not timeframes:
+            return False
+        
+        ret_252 = returns[0]
+        ret_50 = returns[1]
+        ret_20 = returns[2]
+        
+        # Reversal pattern: strong long-term gain but recent negative momentum
+        if ret_252 > 0.05:  # 5%+ gain over 252 days
+            if ret_50 < 0 and ret_20 < 0:  # Both recent periods negative
+                return True
+        
+        return False
+
+    def _detect_market_regime(self, date: str) -> str:
+        """
+        Detect overall market regime (bullish/bearish/neutral).
+        Returns 'bullish', 'bearish', or 'neutral'.
+        
+        Method:
+        - Calculate weighted momentum of Nifty 50 benchmark
+        - If 252d > 0 AND 50d > 0: Bullish (uptrend)
+        - If 252d > 0 AND 50d < 0: Bearish (reversal/downtrend)
+        - Otherwise: Neutral
+        """
+        benchmark = "Nifty 50"
+        ret_252 = self.return_over(benchmark, date, 252)
+        ret_50 = self.return_over(benchmark, date, 50)
+        
+        if ret_252 is None or ret_50 is None:
+            return "neutral"
+        
+        # Bullish: Long-term AND short-term both positive
+        if ret_252 > 0 and ret_50 > 0:
+            return "bullish"
+        
+        # Bearish: Long-term positive BUT short-term negative (or both negative)
+        if ret_252 > 0 and ret_50 < 0:
+            return "bearish"
+        
+        # Bearish if both negative
+        if ret_252 < 0 and ret_50 < 0:
+            return "bearish"
+        
+        return "neutral"
+
+
+
     def rank_universe(self, date: str, timeframes: list, weights: list,
-                      ema_filter: bool) -> list:
+                      ema_filter: bool, custom_universe: list = None,
+                      filter_reversals: bool = False, use_rsi: bool = True) -> list:
         """
         Rank ETFs by weighted momentum score.
         Returns list of (ticker, score, sharpe, market_cap) sorted descending.
+        If custom_universe provided, use that instead of default ETF_UNIVERSE.
+        
+        Args:
+            filter_reversals: If True, penalize ETFs in momentum reversal
+                            (long-term positive but short-term negative)
+            use_rsi: If True, apply RSI confirmation filter
         """
         candidates = []
-        for etf in ETF_UNIVERSE:
+        seen_tickers = set()  # Track seen tickers to prevent duplicates
+        universe = custom_universe if custom_universe else ETF_UNIVERSE
+        for etf in universe:
             ticker = etf["scrip"]
+            # Skip if already seen (prevents duplicates)
+            if ticker in seen_tickers:
+                continue
+            seen_tickers.add(ticker)
             # Require sufficient history for EVERY timeframe, not just the max
             has_all = True
             for tf in timeframes:
@@ -148,43 +361,100 @@ class MomentumEngine:
             if skip:
                 continue
             score = sum(r * w for r, w in zip(returns, weights))
+            
+            # Detect and penalize momentum reversals
+            if filter_reversals and self._detect_momentum_reversal(returns, timeframes):
+                score = score * 0.5  # Penalize by 50% if in reversal
+            
+            # NEW: Apply RSI confirmation filter (conditional)
+            adjusted_score = score
+            if use_rsi:
+                try:
+                    rsi = self.get_rsi_for_ticker(ticker, date, period=14)
+                    if rsi is not None:
+                        if 30 <= rsi <= 80:
+                            confidence = rsi / 100
+                            adjusted_score = score * (1 + confidence * 0.3)
+                        elif rsi > 80:
+                            adjusted_score = score * 0.7
+                        else:
+                            adjusted_score = score * 0.7
+                except Exception as e:
+                    print(f"RSI filter error for {ticker}: {e}")
+            
             sharpe = self.sharpe_return(ticker, date) or 0.0
             mcap = etf.get("market_cap", 0)
-            candidates.append((ticker, score, sharpe, mcap))
+            candidates.append((ticker, adjusted_score, sharpe, mcap))
 
         # Sort: score desc, tie-break sharpe desc, then market_cap desc
         candidates.sort(key=lambda x: (-x[1], -x[2], -x[3]))
         return candidates
 
     def select_portfolio(self, date: str, timeframes: list, weights: list,
-                         ema_filter: bool, portfolio_size: int) -> list:
-        ranked = self.rank_universe(date, timeframes, weights, ema_filter)
+                         ema_filter: bool, portfolio_size: int, custom_universe: list = None,
+                         filter_reversals: bool = False, use_rsi: bool = True) -> list:
+        """
+        Select top portfolio_size ETFs by momentum score.
+        """
+        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals, use_rsi)
         selected = ranked[:portfolio_size]
-        return [ticker for ticker, *_ in selected]
+        return [ticker for ticker, score, sharpe, mcap in selected]
 
     # ── Rebalancing ───────────────────────────────────────────────────────
 
     def rebalance(self, portfolio: list, date: str, timeframes: list,
-                  weights: list, ema_filter: bool, exit_rank: int = 0) -> dict:
+                  weights: list, ema_filter: bool, exit_rank: int = 0, custom_universe: list = None,
+                  filter_reversals: bool = False, use_rsi: bool = True, use_regime_adapt: bool = True,
+                  use_vol_weighting: bool = True) -> dict:
         """
         Rebalance portfolio on given date.
         exit_rank: rank threshold above which an ETF is exited. 0 = auto (2x portfolio size).
+        filter_reversals: If True, penalize ETFs in momentum reversal pattern.
+        use_rsi: If True, apply RSI confirmation filter.
+        use_regime_adapt: If True, adjust exit strategy by market regime.
+        use_vol_weighting: If True, use volatility weighting instead of equal weights.
         Returns dict with new_portfolio, exits, entries, weights, rankings.
         """
-        ranked = self.rank_universe(date, timeframes, weights, ema_filter)
+        total_invested = 0  # Track total money invested for SIP metrics
+        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals, use_rsi)
         rank_map = {ticker: i + 1 for i, (ticker, *_) in enumerate(ranked)}
         if exit_rank <= 0:
             exit_rank = 2 * len(portfolio)
 
-        exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > exit_rank]
+        # NEW: Adjust exit threshold based on market regime (conditional)
+        regime_exit_rank = exit_rank
+        if use_regime_adapt:
+            market_regime = self._detect_market_regime(date)
+            if market_regime == "bullish":
+                regime_exit_rank = exit_rank * 1.5
+            elif market_regime == "bearish":
+                regime_exit_rank = exit_rank * 0.5
+            else:
+                regime_exit_rank = exit_rank
+
+        exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > regime_exit_rank]
+        
+        # Select replacements: pick top unowned candidates
         replacements = []
         for ticker, *_ in ranked:
             if ticker not in portfolio and len(replacements) < len(exits):
                 replacements.append(ticker)
 
         new_portfolio = [etf for etf in portfolio if etf not in exits] + replacements
-        w = 1.0 / len(new_portfolio) if new_portfolio else 0
-        wts = {etf: w for etf in new_portfolio}
+        
+        # NEW: Use volatility-weighted allocation instead of equal weights (conditional)
+        if use_vol_weighting:
+            volatility_weights = self.calculate_volatility_weights(new_portfolio, date)
+            if volatility_weights:
+                wts = volatility_weights
+            else:
+                # Fallback to equal weighting if volatility calculation fails
+                w = 1.0 / len(new_portfolio) if new_portfolio else 0
+                wts = {etf: w for etf in new_portfolio}
+        else:
+            # Use equal weights if vol weighting disabled
+            w = 1.0 / len(new_portfolio) if new_portfolio else 0
+            wts = {etf: w for etf in new_portfolio}
 
         return {
             "new_portfolio": new_portfolio,
@@ -200,8 +470,8 @@ class MomentumEngine:
                                rebal_day: int) -> list:
         """
         Generate rebalancing dates between start and end.
-        frequency: 'weekly' or 'monthly'
-        rebal_day: for weekly 0=Mon..4=Fri; for monthly 1..28
+        frequency: 'weekly', 'monthly', or 'quarterly'
+        rebal_day: for weekly 0=Mon..4=Fri; for monthly/quarterly 1..28
         """
         dates = []
         s = datetime.strptime(start, "%Y-%m-%d")
@@ -213,10 +483,45 @@ class MomentumEngine:
             while current.weekday() != rebal_day:
                 current += timedelta(days=1)
             while current <= e:
-                td = self._next_trading_day(current.strftime("%Y-%m-%d"))
+                td = self._prev_trading_day(current.strftime("%Y-%m-%d"))
                 if td and td >= start and td <= end:
                     dates.append(td)
                 current += timedelta(weeks=1)
+        elif frequency == "quarterly":
+            # Quarterly: every 3 months (Mar, Jun, Sep, Dec)
+            while current <= e:
+                # set to rebal_day of current month
+                try:
+                    target = current.replace(day=min(rebal_day, 28))
+                except ValueError:
+                    target = current.replace(day=28)
+                if target < s:
+                    # move to next quarter
+                    month = current.month
+                    year = current.year
+                    if month <= 3:
+                        current = current.replace(year=year, month=4, day=1)
+                    elif month <= 6:
+                        current = current.replace(year=year, month=7, day=1)
+                    elif month <= 9:
+                        current = current.replace(year=year, month=10, day=1)
+                    else:
+                        current = current.replace(year=year + 1, month=1, day=1)
+                    continue
+                td = self._prev_trading_day(target.strftime("%Y-%m-%d"))
+                if td and td <= end:
+                    dates.append(td)
+                # next quarter
+                month = current.month
+                year = current.year
+                if month <= 3:
+                    current = current.replace(year=year, month=4, day=1)
+                elif month <= 6:
+                    current = current.replace(year=year, month=7, day=1)
+                elif month <= 9:
+                    current = current.replace(year=year, month=10, day=1)
+                else:
+                    current = current.replace(year=year + 1, month=1, day=1)
         else:  # monthly
             while current <= e:
                 # set to rebal_day of current month
@@ -231,7 +536,7 @@ class MomentumEngine:
                     else:
                         current = current.replace(month=current.month + 1, day=1)
                     continue
-                td = self._next_trading_day(target.strftime("%Y-%m-%d"))
+                td = self._prev_trading_day(target.strftime("%Y-%m-%d"))
                 if td and td <= end:
                     dates.append(td)
                 # next month
@@ -242,6 +547,106 @@ class MomentumEngine:
 
         return sorted(set(dates))
 
+    def _get_period_end_dates(self, start: str, end: str, frequency: str) -> list:
+        """
+        Get period-end dates (month-end, week-end, quarter-end, or year-end).
+        Used for measurement points when calculating drawdown and metrics.
+        """
+        dates = []
+        s = datetime.strptime(start, "%Y-%m-%d")
+        e = datetime.strptime(end, "%Y-%m-%d")
+        
+        if frequency == "weekly":
+            # Get all Fridays (week ends)
+            current = s
+            while current.weekday() != 4:  # Friday = 4
+                current += timedelta(days=1)
+            while current <= e:
+                td = self._prev_trading_day(current.strftime("%Y-%m-%d"))
+                if td and td >= start and td <= end:
+                    dates.append(td)
+                current += timedelta(weeks=1)
+        elif frequency == "quarterly":
+            # Quarter ends: Mar, Jun, Sep, Dec
+            quarter_ends = [3, 6, 9, 12]
+            year = s.year
+            month = s.month
+            
+            # Find first quarter end >= start month
+            for qe in quarter_ends:
+                if qe >= month:
+                    try:
+                        target = datetime(year, qe, 1)
+                        # Get last day of month
+                        if qe == 12:
+                            next_month = datetime(year + 1, 1, 1)
+                        else:
+                            next_month = datetime(year, qe + 1, 1)
+                        last_day = (next_month - timedelta(days=1)).day
+                        target = datetime(year, qe, last_day)
+                    except:
+                        target = datetime(year, qe, 28)
+                    
+                    if target >= s:
+                        td = self._prev_trading_day(target.strftime("%Y-%m-%d"))
+                        if td and td >= start and td <= end:
+                            dates.append(td)
+            
+            # Continue to next quarters
+            while True:
+                # Move to next quarter
+                if month <= 3:
+                    month = 6
+                elif month <= 6:
+                    month = 9
+                elif month <= 9:
+                    month = 12
+                else:
+                    month = 3
+                    year += 1
+                
+                try:
+                    if month == 3:
+                        target = datetime(year, 3, 31)
+                    elif month == 6:
+                        target = datetime(year, 6, 30)
+                    elif month == 9:
+                        target = datetime(year, 9, 30)
+                    else:  # Dec
+                        target = datetime(year, 12, 31)
+                except:
+                    target = datetime(year, month, 28)
+                
+                if target > e:
+                    break
+                
+                td = self._prev_trading_day(target.strftime("%Y-%m-%d"))
+                if td and td <= end:
+                    dates.append(td)
+        else:  # monthly
+            current = s.replace(day=1)
+            while current <= e:
+                # Get last day of current month
+                if current.month == 12:
+                    next_month = current.replace(year=current.year + 1, month=1, day=1)
+                else:
+                    next_month = current.replace(month=current.month + 1, day=1)
+                last_day = (next_month - timedelta(days=1)).day
+                try:
+                    target = current.replace(day=last_day)
+                except ValueError:
+                    target = current.replace(day=28)
+                
+                if target >= s:
+                    td = self._prev_trading_day(target.strftime("%Y-%m-%d"))
+                    if td and td >= start and td <= end:
+                        dates.append(td)
+                
+                # Move to next month
+                current = next_month
+        
+        return sorted(set(dates))
+
     # ── Backtest ──────────────────────────────────────────────────────────
 
     def run_backtest(self, config: dict) -> dict:
@@ -250,14 +655,19 @@ class MomentumEngine:
         config keys:
             timeframes: list[int], weights: list[float], ema_filter: bool,
             portfolio_size: int, start_date: str, end_date: str,
-            frequency: str ('weekly'|'monthly'), rebal_day: int,
-            initial_capital: float, transaction_cost_pct: float
+            frequency: str ('weekly'|'monthly'|'quarterly'), rebal_day: int,
+            initial_capital: float, transaction_cost_pct: float,
+            filter_reversals: bool (penalize momentum reversals)
         """
         timeframes = config.get("timeframes", [252, 50, 20])
         raw_weights = config.get("weights", [1, 1, 1])
         wsum = sum(raw_weights)
         weights = [w / wsum for w in raw_weights]
         ema_filter = config.get("ema_filter", False)
+        filter_reversals = config.get("filter_reversals", False)  # NEW: Reversal filter
+        use_rsi = config.get("use_rsi", False)
+        use_regime_adapt = config.get("use_regime_adapt", False)
+        use_vol_weighting = config.get("use_vol_weighting", False)
         portfolio_size = config.get("portfolio_size", 5)
         start_date = config.get("start_date", "2023-01-01")
         end_date = config.get("end_date", "2026-04-18")
@@ -266,6 +676,41 @@ class MomentumEngine:
         initial_capital = config.get("initial_capital", 1000000)
         txn_cost_pct = config.get("transaction_cost_pct", 0.0)
         exit_rank_threshold = config.get("exit_rank", 0)
+        investment_plan = config.get("investment_plan", "onetime")
+        sip_amount = config.get("sip_amount", 0)
+        total_invested = 0  # Track total money invested for SIP metrics
+
+        # Handle custom ETF universe
+        custom_etf_list = config.get("_custom_etf_list")
+        custom_universe = None
+        print(f"[ENGINE DEBUG] Received custom_etf_list: {custom_etf_list}")
+        if custom_etf_list and isinstance(custom_etf_list, list) and len(custom_etf_list) >= 20:
+            # Build custom universe from the scrip list
+            scrip_to_etf = {e["scrip"]: e for e in ETF_UNIVERSE}
+            custom_universe = []
+            seen_scrips = set()  # Track seen ETFs to prevent duplicates
+            for scrip in custom_etf_list:
+                if scrip in seen_scrips:
+                    continue  # Skip duplicates
+                if scrip in scrip_to_etf:
+                    custom_universe.append(scrip_to_etf[scrip])
+                    seen_scrips.add(scrip)
+                else:
+                    # Try to find in ALL_ETF_UNIVERSE if available
+                    try:
+                        from etf_data import ALL_ETF_UNIVERSE
+                        all_etf_map = {e["scrip"]: e for e in ALL_ETF_UNIVERSE}
+                        if scrip in all_etf_map:
+                            custom_universe.append(all_etf_map[scrip])
+                            seen_scrips.add(scrip)
+                    except ImportError:
+                        pass
+            print(f"[ENGINE DEBUG] Built custom_universe with {len(custom_universe)} ETFs (deduplicated): {[e['scrip'] for e in custom_universe[:10]]}...")
+            if len(custom_universe) < 20:
+                print(f"[ENGINE DEBUG] Too few ETFs in custom universe ({len(custom_universe)} < 20), falling back to default")
+                custom_universe = None  # Fall back to default if too few valid ETFs
+        else:
+            print(f"[ENGINE DEBUG] No valid custom_etf_list received, using default universe")
 
         # Need enough history before start
         max_tf = max(timeframes)
@@ -281,25 +726,68 @@ class MomentumEngine:
 
         # Initial selection
         portfolio = self.select_portfolio(actual_start, timeframes, weights,
-                                          ema_filter, portfolio_size)
+                                          ema_filter, portfolio_size, custom_universe,
+                                          filter_reversals, use_rsi)
         if not portfolio:
             return {"error": "No ETFs pass filters on start date"}
 
-        # Rebalancing dates
-        rebal_dates = set(self._get_rebalancing_dates(actual_start, end_date,
+        # Rebalancing dates (use _prev_trading_day to get trading day before selected date)
+        all_rebal_dates = set(self._get_rebalancing_dates(actual_start, end_date,
                                                        frequency, rebal_day))
+        start_month = actual_start[:7]  # "YYYY-MM"
+
+        # For onetime: skip initial month entirely
+        # For sip: keep all rebalance dates (SIP invests from first rebalance)
+        # For both: keep initial month for SIP-only injection, skip portfolio rebalancing
+        if investment_plan == "sip":
+            rebal_dates = all_rebal_dates
+        else:
+            rebal_dates = {d for d in all_rebal_dates if d[:7] != start_month}
+        # SIP injection dates: for sip/both, include initial month
+        sip_only_dates = set()  # dates where only SIP happens (no portfolio rebalance)
+        if investment_plan == "both":
+            sip_only_dates = {d for d in all_rebal_dates if d[:7] == start_month}
+        
+        # Get period-end dates for metric calculation (rebalance dates take priority)
+        period_end_dates = set(self._get_period_end_dates(actual_start, end_date, frequency))
+        # Measurement points = rebal dates + sip-only dates + period ends
+        measurement_dates = sorted(rebal_dates | sip_only_dates | period_end_dates)
+        if actual_start not in measurement_dates:
+            measurement_dates = [actual_start] + measurement_dates
 
         # ── Unit-based portfolio tracking ─────────────────────────────────
-        capital = initial_capital
-        alloc_per_etf = capital / len(portfolio)
+        if investment_plan == "sip":
+            # SIP-only: no initial capital, first investment happens at first rebalance
+            capital = 0
+            total_invested = 0
+        else:
+            # One-time or Both: invest initial capital at start
+            capital = initial_capital
+            total_invested = initial_capital
+
         units = {}       # {etf: number_of_units}
-        buy_prices = {}  # {etf: price_at_purchase}
+        buy_prices = {}  # {etf: price_at_purchase (weighted avg)}
         buy_dates = {}   # {etf: date_of_purchase}
-        for etf in portfolio:
-            bp = self._get_price(etf, actual_start)
-            units[etf] = alloc_per_etf / bp if bp and bp > 0 else 0
-            buy_prices[etf] = bp or 0
-            buy_dates[etf] = actual_start
+
+        def _allocation_weights(holdings: list, allocation_date: str) -> dict:
+            """Return equal or inverse-volatility allocation weights for a cash deployment."""
+            if not holdings:
+                return {}
+            if use_vol_weighting:
+                volatility_weights = self.calculate_volatility_weights(holdings, allocation_date)
+                if volatility_weights and sum(volatility_weights.values()) > 0:
+                    return volatility_weights
+            equal_weight = 1.0 / len(holdings)
+            return {etf: equal_weight for etf in holdings}
+
+        if capital > 0:
+            initial_weights = _allocation_weights(portfolio, actual_start)
+            for etf in portfolio:
+                bp = self._get_price(etf, actual_start)
+                allocation = capital * initial_weights[etf]
+                units[etf] = allocation / bp if bp and bp > 0 else 0
+                buy_prices[etf] = bp or 0
+                buy_dates[etf] = actual_start
 
         def _build_holdings_detail(day):
             """Per-ETF detail: units, buy price, current price, invested, current value, P&L%."""
@@ -335,16 +823,16 @@ class MomentumEngine:
             return {etf_t: round(v / total, 4) if total > 0 else 0 for etf_t, v in vals.items()}
 
         events = []
-        equity_curve = []
+        equity_curve = []  # Now tracks only at measurement points
         benchmark_curves = {name: [] for name in self.benchmark_prices}
-        daily_returns_list = []
+        period_returns_list = []  # Returns between measurement points (not daily)
+        total_trades = 0  # Count of entry + exit transactions
 
-        w_init = 1.0 / len(portfolio)
         events.append({
             "date": actual_start,
             "type": "INITIAL_SELECTION",
             "portfolio": list(portfolio),
-            "weights": {etf: round(w_init, 4) for etf in portfolio},
+            "weights": {etf: round(weight, 4) for etf, weight in _allocation_weights(portfolio, actual_start).items()},
             "holdings_detail": _build_holdings_detail(actual_start),
             "capital": round(capital, 2),
         })
@@ -372,6 +860,19 @@ class MomentumEngine:
             bench_start_prices[bm_name] = bp if bp is not None else 1.0
 
         prev_portfolio_value = capital
+        last_measure_value = capital
+        last_measure_date = actual_start
+
+        # Benchmark unit tracking for SIP simulation
+        # For onetime: lump sum into benchmark at start
+        # For sip/both: buy benchmark units at each SIP injection point
+        bench_units = {}  # {bm_name: total_units}
+        for bm_name in self.benchmark_prices:
+            bp = bench_start_prices[bm_name]
+            if investment_plan == "sip":
+                bench_units[bm_name] = 0  # no initial investment
+            else:
+                bench_units[bm_name] = initial_capital / bp if bp > 0 else 0
 
         for i in range(start_idx, end_idx + 1):
             day = self.trading_days[i]
@@ -387,25 +888,55 @@ class MomentumEngine:
             else:
                 port_return = 0
 
-            daily_returns_list.append(port_return)
-
-            equity_curve.append({"date": day, "value": round(capital, 2)})
-            for bm_name, bm_data in self.benchmark_prices.items():
-                bp_now = bm_data.get(day, bench_start_prices[bm_name])
-                benchmark_curves[bm_name].append({
-                    "date": day,
-                    "value": round(initial_capital * bp_now / bench_start_prices[bm_name], 2)
-                })
+            # Record at measurement points (rebalance dates + period ends)
+            is_measurement = day in measurement_dates
+            is_rebal = day in rebal_dates and day != actual_start
+            is_sip_only = day in sip_only_dates and day != actual_start
+            
+            # Check if short period (<=3 months) - record daily for detailed view
+            total_days = end_idx - start_idx
+            is_short_period = total_days <= 63  # ~3 months of trading days
+            
+            if is_measurement or is_short_period:
+                # Calculate return since last measurement point (only for measurement points)
+                if is_measurement:
+                    period_return = (capital / last_measure_value - 1) if last_measure_value > 0 else 0
+                    period_returns_list.append(period_return)
+                    last_measure_value = capital
+                    last_measure_date = day
+                
+                # Record equity curve point (daily for short periods, otherwise at measurements)
+                equity_curve.append({"date": day, "value": round(capital, 2)})
+                for bm_name, bm_data in self.benchmark_prices.items():
+                    bp_now = bm_data.get(day, bench_start_prices[bm_name])
+                    bm_value = bench_units[bm_name] * bp_now
+                    benchmark_curves[bm_name].append({
+                        "date": day,
+                        "value": round(bm_value, 2)
+                    })
 
             # Rebalance check
-            if day in rebal_dates and day != actual_start:
-                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold)
+            if is_rebal:
+                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold, custom_universe, filter_reversals, use_rsi, use_regime_adapt, use_vol_weighting)
                 if result["exits"] or result["entries"]:
-                    # Only transfer capital from exited ETFs to new entries
-                    exit_value = sum(
-                        units.get(etf, 0) * (self._get_price(etf, day) or 0)
-                        for etf in result["exits"]
-                    )
+                    # Count trades: each exit and each entry is one trade
+                    total_trades += len(result["exits"]) + len(result["entries"])
+
+                    # Calculate exit value for each ETF individually
+                    exit_details = {}
+                    for etf in result["exits"]:
+                        etf_exit_price = self._get_price(etf, day) or 0
+                        etf_units = units.get(etf, 0)
+                        etf_exit_value = etf_units * etf_exit_price
+                        exit_details[etf] = {
+                            "units": round(etf_units, 4),
+                            "exit_price": round(etf_exit_price, 2),
+                            "exit_value": round(etf_exit_value, 2),
+                        }
+
+                    # Total exit value from all exited ETFs
+                    exit_value = sum(d["exit_value"] for d in exit_details.values())
+
                     # Apply transaction cost on the swapped amount
                     cost = exit_value * txn_cost_pct / 100.0
                     exit_pool = exit_value - cost
@@ -416,18 +947,44 @@ class MomentumEngine:
                         buy_prices.pop(etf, None)
                         buy_dates.pop(etf, None)
 
-                    # Allocate exit pool equally among new entries
+                    # Allocate exit proceeds to new entries by the configured allocation method.
                     n_entries = len(result["entries"])
                     if n_entries > 0 and exit_pool > 0:
-                        alloc_each = exit_pool / n_entries
+                        entry_weights = _allocation_weights(result["entries"], day)
                         for etf in result["entries"]:
                             bp_r = self._get_price(etf, day)
-                            units[etf] = alloc_each / bp_r if bp_r and bp_r > 0 else 0
+                            allocation = exit_pool * entry_weights[etf]
+                            units[etf] = allocation / bp_r if bp_r and bp_r > 0 else 0
                             buy_prices[etf] = bp_r or 0
                             buy_dates[etf] = day
 
                     portfolio = result["new_portfolio"]
-                    # Recalculate total capital after swap
+
+                    # ── SIP injection on rebalance date ──
+                    sip_invested_this_month = 0
+                    if sip_amount > 0 and investment_plan in ("sip", "both"):
+                        sip_invested_this_month = sip_amount
+                        total_invested += sip_amount
+                        sip_weights = _allocation_weights(portfolio, day)
+                        for etf in portfolio:
+                            bp_s = self._get_price(etf, day)
+                            if bp_s and bp_s > 0:
+                                new_units = (sip_amount * sip_weights[etf]) / bp_s
+                                old_units = units.get(etf, 0)
+                                old_cost = old_units * buy_prices.get(etf, 0)
+                                units[etf] = old_units + new_units
+                                # Update weighted average buy price
+                                total_cost = old_cost + (new_units * bp_s)
+                                buy_prices[etf] = total_cost / units[etf] if units[etf] > 0 else bp_s
+                                if etf not in buy_dates:
+                                    buy_dates[etf] = day
+                        # Buy benchmark units with same SIP amount
+                        for bm_name, bm_data in self.benchmark_prices.items():
+                            bp_bm = bm_data.get(day, bench_start_prices[bm_name])
+                            if bp_bm > 0:
+                                bench_units[bm_name] += sip_amount / bp_bm
+
+                    # Recalculate total capital after swap + SIP
                     capital = sum(
                         units.get(etf, 0) * (self._get_price(etf, day) or 0)
                         for etf in portfolio
@@ -438,6 +995,7 @@ class MomentumEngine:
                         "type": "REBALANCE",
                         "exits": result["exits"],
                         "entries": result["entries"],
+                        "exit_details": exit_details,
                         "portfolio": result["new_portfolio"],
                         "weights": _compute_weights(),
                         "holdings_detail": _build_holdings_detail(day),
@@ -445,15 +1003,81 @@ class MomentumEngine:
                         "capital": round(capital, 2),
                         "txn_cost": round(cost, 2),
                         "exit_value": round(exit_value, 2),
+                        "sip_invested": round(sip_invested_this_month, 2),
                     })
                 else:
+                    # No portfolio change, but still inject SIP
+                    sip_invested_this_month = 0
+                    if sip_amount > 0 and investment_plan in ("sip", "both"):
+                        sip_invested_this_month = sip_amount
+                        total_invested += sip_amount
+                        sip_weights = _allocation_weights(portfolio, day)
+                        for etf in portfolio:
+                            bp_s = self._get_price(etf, day)
+                            if bp_s and bp_s > 0:
+                                new_units = (sip_amount * sip_weights[etf]) / bp_s
+                                old_units = units.get(etf, 0)
+                                old_cost = old_units * buy_prices.get(etf, 0)
+                                units[etf] = old_units + new_units
+                                total_cost = old_cost + (new_units * bp_s)
+                                buy_prices[etf] = total_cost / units[etf] if units[etf] > 0 else bp_s
+                                if etf not in buy_dates:
+                                    buy_dates[etf] = day
+                        # Buy benchmark units with same SIP amount
+                        for bm_name, bm_data in self.benchmark_prices.items():
+                            bp_bm = bm_data.get(day, bench_start_prices[bm_name])
+                            if bp_bm > 0:
+                                bench_units[bm_name] += sip_amount / bp_bm
+
+                        capital = sum(
+                            units.get(etf, 0) * (self._get_price(etf, day) or 0)
+                            for etf in portfolio
+                        )
+
                     events.append({
                         "date": day,
                         "type": "REBALANCE_NO_CHANGE",
                         "portfolio": list(portfolio),
                         "holdings_detail": _build_holdings_detail(day),
                         "capital": round(capital, 2),
+                        "sip_invested": round(sip_invested_this_month, 2),
                     })
+
+            # SIP-only injection (for "both" plan in the initial month)
+            if is_sip_only and sip_amount > 0 and investment_plan == "both":
+                sip_invested_this_date = sip_amount
+                total_invested += sip_amount
+                sip_weights = _allocation_weights(portfolio, day)
+                for etf in portfolio:
+                    bp_s = self._get_price(etf, day)
+                    if bp_s and bp_s > 0:
+                        new_units = (sip_amount * sip_weights[etf]) / bp_s
+                        old_units = units.get(etf, 0)
+                        old_cost = old_units * buy_prices.get(etf, 0)
+                        units[etf] = old_units + new_units
+                        total_cost_val = old_cost + (new_units * bp_s)
+                        buy_prices[etf] = total_cost_val / units[etf] if units[etf] > 0 else bp_s
+                        if etf not in buy_dates:
+                            buy_dates[etf] = day
+                # Buy benchmark units with same SIP amount
+                for bm_name, bm_data in self.benchmark_prices.items():
+                    bp_bm = bm_data.get(day, bench_start_prices[bm_name])
+                    if bp_bm > 0:
+                        bench_units[bm_name] += sip_amount / bp_bm
+
+                capital = sum(
+                    units.get(etf, 0) * (self._get_price(etf, day) or 0)
+                    for etf in portfolio
+                )
+
+                events.append({
+                    "date": day,
+                    "type": "SIP_INVESTMENT",
+                    "portfolio": list(portfolio),
+                    "holdings_detail": _build_holdings_detail(day),
+                    "capital": round(capital, 2),
+                    "sip_invested": round(sip_invested_this_date, 2),
+                })
 
             prev_portfolio_value = capital
 
@@ -461,57 +1085,66 @@ class MomentumEngine:
         total_days = end_idx - start_idx
         total_years = total_days / 252.0 if total_days > 0 else 1
 
-        total_return = (capital / initial_capital) - 1
-        cagr = (capital / initial_capital) ** (1 / total_years) - 1 if total_years > 0 else 0
+        # For SIP/Both, use total_invested; for one-time, use initial_capital
+        effective_invested = total_invested if total_invested > 0 else initial_capital
+        total_return = (capital / effective_invested) - 1 if effective_invested > 0 else 0
+        cagr = (capital / effective_invested) ** (1 / total_years) - 1 if (total_years > 0 and effective_invested > 0) else 0
 
-        # Sharpe
-        if daily_returns_list:
-            mean_r = sum(daily_returns_list) / len(daily_returns_list)
-            var_r = sum((r - mean_r) ** 2 for r in daily_returns_list) / len(daily_returns_list)
+        # Sharpe (calculated from period returns, not daily)
+        n_periods = len(period_returns_list)
+        if n_periods > 1:
+            mean_r = sum(period_returns_list) / n_periods
+            var_r = sum((r - mean_r) ** 2 for r in period_returns_list) / n_periods
             std_r = math.sqrt(var_r) if var_r > 0 else 1e-10
-            sharpe = (mean_r / std_r) * math.sqrt(252)
+            # Annualize based on number of periods per year
+            periods_per_year = n_periods / total_years if total_years > 0 else 12
+            sharpe = (mean_r / std_r) * math.sqrt(periods_per_year) if std_r > 0 else 0
         else:
             sharpe = 0
+            std_r = 0
 
         # Max Drawdown
-        peak = initial_capital
+        first_value = equity_curve[0]["value"] if equity_curve else effective_invested
+        peak = first_value if first_value > 0 else 1
         max_dd = 0
+        max_dd_date = None
+        max_dd_peak = peak
         for pt in equity_curve:
             if pt["value"] > peak:
                 peak = pt["value"]
             dd = (peak - pt["value"]) / peak
             if dd > max_dd:
                 max_dd = dd
+                max_dd_date = pt["date"]
+                max_dd_peak = peak
 
-        # Win Rate (positive daily returns)
-        positive_days = sum(1 for r in daily_returns_list if r > 0)
-        win_rate = positive_days / len(daily_returns_list) if daily_returns_list else 0
+        # Win Rate (positive period returns)
+        positive_periods = sum(1 for r in period_returns_list if r > 0)
+        win_rate = positive_periods / n_periods if n_periods > 0 else 0
 
-        # Annualised Volatility
-        ann_vol = std_r * math.sqrt(252) if daily_returns_list else 0
+        # Annualised Volatility (based on period returns)
+        periods_per_year = n_periods / total_years if total_years > 0 else 12
+        ann_vol = std_r * math.sqrt(periods_per_year) if n_periods > 1 else 0
 
-        # Beta vs primary benchmark (Nifty 50)
+        # Beta vs primary benchmark (Nifty 50) - calculated at measurement points only
         primary_bm_data = self.benchmark_prices.get(self._primary_bm, {})
-        bench_returns = []
-        for i in range(start_idx, end_idx + 1):
-            if i == start_idx:
-                bench_returns.append(0)
-                continue
-            day = self.trading_days[i]
-            prev_day = self.trading_days[i - 1]
+        bench_period_returns = []
+        bench_prev_value = None
+        
+        for pt in equity_curve:
+            day = pt["date"]
             bp = primary_bm_data.get(day, 0)
-            bp_prev = primary_bm_data.get(prev_day, 0)
-            if bp_prev > 0:
-                bench_returns.append((bp / bp_prev) - 1)
-            else:
-                bench_returns.append(0)
-
-        if len(bench_returns) > 1 and len(daily_returns_list) == len(bench_returns):
-            mean_b = sum(bench_returns) / len(bench_returns)
-            mean_p = sum(daily_returns_list) / len(daily_returns_list)
-            cov = sum((daily_returns_list[i] - mean_p) * (bench_returns[i] - mean_b)
-                       for i in range(len(bench_returns))) / len(bench_returns)
-            var_b = sum((b - mean_b) ** 2 for b in bench_returns) / len(bench_returns)
+            if bench_prev_value is not None and bench_prev_value > 0:
+                bench_period_returns.append((bp / bench_prev_value) - 1)
+            bench_prev_value = bp
+        
+        # Align portfolio and benchmark period returns
+        if len(bench_period_returns) == len(period_returns_list) and len(period_returns_list) > 1:
+            mean_b = sum(bench_period_returns) / len(bench_period_returns)
+            mean_p = sum(period_returns_list) / len(period_returns_list)
+            cov = sum((period_returns_list[i] - mean_p) * (bench_period_returns[i] - mean_b)
+                       for i in range(len(bench_period_returns))) / len(bench_period_returns)
+            var_b = sum((b - mean_b) ** 2 for b in bench_period_returns) / len(bench_period_returns)
             beta = cov / var_b if var_b > 0 else 0
         else:
             beta = 0
@@ -521,45 +1154,59 @@ class MomentumEngine:
             "cagr": round(cagr * 100, 2),
             "sharpe": round(sharpe, 2),
             "max_drawdown": round(max_dd * 100, 2),
+            "max_drawdown_date": max_dd_date,
+            "max_drawdown_peak": round(max_dd_peak, 2),
             "win_rate": round(win_rate * 100, 2),
             "annualised_volatility": round(ann_vol * 100, 2),
             "beta": round(beta, 2),
             "total_days": total_days,
             "initial_capital": initial_capital,
             "final_capital": round(capital, 2),
+            "total_trades": total_trades,
+            "total_invested": round(total_invested, 2),
+            "investment_plan": investment_plan,
+            "sip_amount": sip_amount,
         }
 
         # Current indicators for universe
         final_date = self.trading_days[end_idx]
 
-        # Compute final holdings detail from actual units
+        # Compute final holdings detail from actual units calculated during backtest
         final_holdings_detail = {}
         final_total_value = 0
+        
+        # Portfolio is a list of ETF scrips, get units and buy_prices from backtest tracking
         for etf in portfolio:
             cp = self._get_price(etf, final_date) or 0
-            cv = units.get(etf, 0) * cp
+            etf_units = units.get(etf, 0)
+            etf_buy_price = buy_prices.get(etf, 0)
+            cv = etf_units * cp
             final_total_value += cv
+            
         final_weights = {}
         for etf in portfolio:
             cp = self._get_price(etf, final_date) or 0
-            cv = units.get(etf, 0) * cp
-            invested = units.get(etf, 0) * buy_prices.get(etf, 0)
-            pnl = round(((cp / buy_prices[etf]) - 1) * 100, 2) if buy_prices.get(etf, 0) > 0 else 0
+            etf_units = units.get(etf, 0)
+            etf_buy_price = buy_prices.get(etf, 0)
+            cv = etf_units * cp
             final_weights[etf] = round(cv / final_total_value, 4) if final_total_value > 0 else 0
+            invested_val = round(etf_units * etf_buy_price, 2)
+            pnl_val = round(((cp / etf_buy_price) - 1) * 100, 2) if etf_buy_price > 0 else 0
             final_holdings_detail[etf] = {
-                "units": round(units.get(etf, 0), 4),
-                "buy_price": round(buy_prices.get(etf, 0), 2),
+                "units": round(etf_units, 4),
+                "buy_price": round(etf_buy_price, 2),
                 "buy_date": buy_dates.get(etf, ""),
                 "current_price": round(cp, 2),
-                "invested": round(invested, 2),
+                "invested": invested_val,
                 "current_value": round(cv, 2),
-                "pnl_pct": pnl,
+                "pnl_pct": pnl_val,
             }
 
         # Build universe snapshot for ALL ETFs with available data
         universe_snapshot = []
         all_etf_scores = []
-        for etf_info in ETF_UNIVERSE:
+        snapshot_universe = custom_universe if custom_universe else ETF_UNIVERSE
+        for etf_info in snapshot_universe:
             ticker = etf_info["scrip"]
             close = self._get_price(ticker, final_date)
             if close is None:
@@ -575,6 +1222,11 @@ class MomentumEngine:
                 else:
                     skip_score = True
             score = sum(r * w for r, w in zip(returns_list, weights[:len(returns_list)])) if returns_list else 0
+            
+            # Apply reversal filter penalty if enabled (same logic as rank_universe)
+            if filter_reversals and not skip_score and self._detect_momentum_reversal(returns_list, timeframes):
+                score = score * 0.5
+            
             sh = self.sharpe_return(ticker, final_date) or 0
             all_etf_scores.append((ticker, score, sh, skip_score, ret_pcts))
 
@@ -600,28 +1252,55 @@ class MomentumEngine:
 
         # ── Monthly Validation Summary ────────────────────────────────────
         monthly_summary = self._build_monthly_summary(
-            equity_curve, benchmark_curves, events, initial_capital
+            equity_curve, benchmark_curves, events, effective_invested
         )
 
+        # Detect market regime on start and end dates
+        start_regime = self._detect_market_regime(actual_start)
+        end_regime = self._detect_market_regime(end_date)
+
+        # Build the config dict for the result
+        result_config = {
+            "timeframes": timeframes,
+            "weights": [round(w, 4) for w in weights],
+            "ema_filter": ema_filter,
+            "filter_reversals": filter_reversals,
+            "use_rsi": use_rsi,
+            "use_regime_adapt": use_regime_adapt,
+            "use_vol_weighting": use_vol_weighting,
+            "portfolio_size": portfolio_size,
+            "start_date": actual_start,
+            "end_date": end_date,
+            "frequency": frequency,
+            "rebal_day": rebal_day,
+            "initial_capital": initial_capital,
+            "txn_cost_pct": txn_cost_pct,
+            "exit_rank": exit_rank_threshold,
+            "investment_plan": investment_plan,
+            "sip_amount": sip_amount,
+            "market_regime": {
+                "start_date": start_regime,
+                "end_date": end_regime
+            }
+        }
+        
+        # Add custom universe info if it was used
+        if custom_universe:
+            result_config["universe_mode"] = "custom"
+            result_config["etf_universe"] = [e["scrip"] for e in custom_universe]
+        else:
+            result_config["universe_mode"] = "default"
+            result_config["etf_universe"] = [e["scrip"] for e in ETF_UNIVERSE]
+        
         return {
-            "config": {
-                "timeframes": timeframes,
-                "weights": [round(w, 4) for w in weights],
-                "ema_filter": ema_filter,
-                "portfolio_size": portfolio_size,
-                "start_date": actual_start,
-                "end_date": end_date,
-                "frequency": frequency,
-                "rebal_day": rebal_day,
-                "txn_cost_pct": txn_cost_pct,
-                "exit_rank": exit_rank_threshold,
-            },
+            "config": result_config,
+            "selected_etfs": portfolio if portfolio else [],  # Add selected ETFs to results
             "metrics": metrics,
             "equity_curve": equity_curve,
             "benchmark_curves": benchmark_curves,
             "benchmark_names": list(benchmark_curves.keys()),
             "events": events,
-            "final_portfolio": portfolio,
+            "final_portfolio": portfolio if portfolio else [],
             "final_weights": final_weights,
             "final_holdings_detail": final_holdings_detail,
             "final_capital": round(capital, 2),
@@ -673,7 +1352,7 @@ class MomentumEngine:
             month_high = max(p["value"] for p in eq_pts)
             month_low = min(p["value"] for p in eq_pts)
             month_return_pct = ((month_close - month_open) / month_open * 100) if month_open else 0
-            cumulative_return = ((month_close - initial_capital) / initial_capital * 100)
+            cumulative_return = ((month_close - initial_capital) / initial_capital * 100) if initial_capital > 0 else 0
 
             # Per-benchmark monthly returns
             bm_returns = {}

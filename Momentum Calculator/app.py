@@ -7,9 +7,31 @@ Access: http://localhost:5000
 import json
 import io
 import csv
+import os
+from datetime import datetime
 from flask import Flask, request, jsonify, send_file, Response
 from engine import MomentumEngine
 from etf_data import ETF_UNIVERSE
+# Profile storage
+PROFILE_FILE = "profiles.json"
+MAX_PROFILES = 10
+
+
+def load_profiles():
+    """Load profiles from JSON file."""
+    if os.path.exists(PROFILE_FILE):
+        try:
+            with open(PROFILE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_profiles(profiles):
+    """Save profiles to JSON file."""
+    with open(PROFILE_FILE, 'w') as f:
+        json.dump(profiles, f, indent=2)
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 
@@ -19,10 +41,17 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    # Add cache-busting headers for HTML files
+    if 'text/html' in response.content_type:
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 engine = MomentumEngine()
 
+# Constants for validation
+allowed_sizes = [5, 6, 7] + list(range(20, 76))  # Allow 20-75 for custom selection
 
 @app.route("/")
 def index():
@@ -69,8 +98,9 @@ def get_rankings():
     wsum = sum(raw_weights)
     weights = [w / wsum for w in raw_weights]
     ema_filter = request.args.get("ema_filter", "false").lower() == "true"
+    filter_reversals = request.args.get("filter_reversals", "false").lower() == "true"
 
-    ranked = engine.rank_universe(date, timeframes, weights, ema_filter)
+    ranked = engine.rank_universe(date, timeframes, weights, ema_filter, filter_reversals=filter_reversals)
     result = []
     for i, (ticker, score, sharpe, mcap) in enumerate(ranked):
         result.append({
@@ -83,16 +113,28 @@ def get_rankings():
         })
     return jsonify(result)
 
-# print hello
+
 @app.route("/api/info", methods=["GET"])
 def get_info():
     """Return available date range and metadata."""
+    # Import ETF universe data
+    from etf_data import ALL_ETF_UNIVERSE, ETF_UNIVERSE
+    
+    # Get available ETFs (intersection of ALL_ETF_UNIVERSE and loaded prices)
+    available_scrips = set(engine.prices.keys())
+    available_etfs = [e for e in ALL_ETF_UNIVERSE if e["scrip"] in available_scrips]
+    
     return jsonify({
         "first_date": engine.trading_days[0] if engine.trading_days else None,
         "last_date": engine.trading_days[-1] if engine.trading_days else None,
         "total_trading_days": len(engine.trading_days),
         "etfs_loaded": len(engine.prices),
         "benchmarks_loaded": list(engine.benchmark_prices.keys()),
+        "all_etf_universe": ALL_ETF_UNIVERSE,
+        "default_etf_universe": [e["scrip"] for e in ETF_UNIVERSE],
+        "available_etfs": available_etfs,
+        "min_etf_selection": 20,
+        "max_etf_selection": 75,
     })
 
 
@@ -104,139 +146,176 @@ def run_backtest():
         return jsonify({"error": "JSON body required"}), 400
 
     # Validate required fields
-    allowed_sizes = [5, 6, 7]
     ps = config.get("portfolio_size", 5)
     if ps not in allowed_sizes:
         return jsonify({"error": f"portfolio_size must be one of {allowed_sizes}"}), 400
 
-    allowed_freq = ["weekly", "monthly"]
+    allowed_freq = ["weekly", "monthly", "quarterly"]
     freq = config.get("frequency", "monthly")
     if freq not in allowed_freq:
         return jsonify({"error": f"frequency must be one of {allowed_freq}"}), 400
 
+    allowed_plans = ["onetime", "sip", "both"]
+    plan = config.get("investment_plan", "onetime")
+    if plan not in allowed_plans:
+        return jsonify({"error": f"investment_plan must be one of {allowed_plans}"}), 400
+
+    # Handle custom ETF universe if provided
+    etf_universe = config.get("etf_universe")
+    universe_mode = config.get("universe_mode", "default")
+    filter_reversals = config.get("filter_reversals", False)
+    use_rsi = config.get("use_rsi", False)
+    use_regime_adapt = config.get("use_regime_adapt", False)
+    use_vol_weighting = config.get("use_vol_weighting", False)
+    
+    print(f"[DEBUG] Backend received ETF universe: {etf_universe}")
+    print(f"[DEBUG] Universe mode: {universe_mode}")
+    print(f"[DEBUG] Filter reversals: {filter_reversals}")
+    print(f"[DEBUG] Use RSI: {use_rsi}")
+    print(f"[DEBUG] Use Regime Adaptation: {use_regime_adapt}")
+    print(f"[DEBUG] Use Volatility Weighting: {use_vol_weighting}")
+    print(f"[DEBUG] ETF universe type: {type(etf_universe)}")
+    
+    if etf_universe and isinstance(etf_universe, list) and len(etf_universe) >= 20:
+        # Use custom universe - filter to only include ETFs that exist in our data
+        available_etfs = set(engine.prices.keys())
+        valid_custom = [e for e in etf_universe if e in available_etfs]
+        print(f"[DEBUG] Valid custom ETFs: {valid_custom}")
+        if len(valid_custom) >= 20:
+            config["_custom_etf_list"] = valid_custom
+            print(f"[DEBUG] Set custom ETF list with {len(valid_custom)} ETFs")
+        else:
+            print(f"[DEBUG] Not enough valid ETFs ({len(valid_custom)} < 20), using default")
+    else:
+        print(f"[DEBUG] Using default ETF universe")
+    
+    # Run the backtest using the engine
     result = engine.run_backtest(config)
+
+    if "error" in result:
+        return jsonify(result), 400
+
     return jsonify(result)
 
 
-@app.route("/api/export_csv", methods=["POST"])
-def export_csv():
-    """Export momentum rankings CSV for all rebalance dates."""
-    config = request.get_json() or {}
-    timeframes = config.get("timeframes", [252, 50, 20])
-    raw_weights = config.get("weights", [1, 1, 1])
-    wsum = sum(raw_weights)
-    weights = [w / wsum for w in raw_weights]
-    start_date = config.get("start_date", "2023-01-01")
-    end_date = config.get("end_date", "2026-04-18")
-    frequency = config.get("frequency", "monthly")
-    rebal_day = config.get("rebal_day", 1)
-    portfolio_size = config.get("portfolio_size", 5)
-    exit_rank_val = config.get("exit_rank", 0)
+@app.route("/api/profiles", methods=["GET"])
+def get_profiles():
+    """Get all saved profiles."""
+    profiles = load_profiles()
+    return jsonify(profiles)
 
-    max_tf = max(timeframes)
-    idx = engine._date_index(start_date)
-    if idx is None or idx < max_tf + 1:
-        idx = max_tf + 1
-    actual_start = engine.trading_days[idx]
-    end_idx = engine._date_index(end_date)
-    actual_end = engine.trading_days[end_idx] if end_idx else engine.trading_days[-1]
 
-    rebal_dates = engine._get_rebalancing_dates(actual_start, actual_end, frequency, rebal_day)
-    all_dates = sorted(set([actual_start] + rebal_dates))
+@app.route("/api/profiles", methods=["POST"])
+def create_profile():
+    """Create a new profile from backtest criteria for forward testing."""
+    data = request.get_json()
+    if not data or "name" not in data or "config" not in data:
+        return jsonify({"error": "name and config required"}), 400
 
-    portfolio = engine.select_portfolio(actual_start, timeframes, weights, False, portfolio_size)
+    profiles = load_profiles()
 
-    header = ["Date", "Scrip", "Sector", "Close"]
-    for tf in timeframes:
-        header.append(f"Price_{tf}d_Ago")
-    for tf in timeframes:
-        header.append(f"Return_{tf}d_%")
-    for tf in timeframes:
-        header.append(f"Rank_{tf}d")
-    header += ["Has_252d_Data", "Combined_Score_%", "Overall_Rank", "In_Portfolio",
-               "Sharpe_252d", "RSI_14", "Volatility_%", "EMA200", "Above_EMA200"]
+    if len(profiles) >= MAX_PROFILES:
+        return jsonify({"error": f"Maximum {MAX_PROFILES} profiles allowed"}), 400
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(header)
+    # Get the latest available date (today from data perspective)
+    latest_date = engine.trading_days[-1] if engine.trading_days else "2025-01-01"
+    
+    profile_id = f"profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # Store config for forward testing - will start from today going forward
+    profile_config = data["config"].copy()
+    # The profile starts tracking from today (end date of backtest)
+    profile_config["start_date"] = latest_date
+    
+    profile = {
+        "id": profile_id,
+        "name": data["name"],
+        "config": profile_config,
+        "created_at": datetime.now().isoformat(),
+        "tracking_start_date": latest_date,
+        "original_backtest_start": data["config"].get("start_date", ""),
+    }
 
-    for date in all_dates:
-        etf_data = []
-        for etf in ETF_UNIVERSE:
-            ticker = etf["scrip"]
-            close = engine._get_price(ticker, date)
-            if close is None:
-                continue
-            has_252d = engine.has_history(ticker, date, 252 + 1)
-            returns = {}
-            prices_ago = {}
-            for tf in timeframes:
-                r = engine.return_over(ticker, date, tf)
-                returns[tf] = r
-                series = engine._get_price_series(ticker, date, tf + 1)
-                prices_ago[tf] = series[0] if len(series) >= tf + 1 else None
-            available = {tf: r for tf, r in returns.items() if r is not None}
-            if available:
-                combined = sum(r * w for tf, (r, w) in
-                               zip(timeframes, zip([returns[tf] for tf in timeframes], weights))
-                               if returns[tf] is not None)
-                w_used = sum(w for tf, w in zip(timeframes, weights) if returns[tf] is not None)
-                combined = combined / w_used if w_used else 0
-            else:
-                combined = -999
-            sharpe = engine.sharpe_return(ticker, date) or 0
-            rsi_val = engine.rsi(ticker, date) or 0
-            vol = engine.volatility(ticker, date) or 0
-            ema = engine.ema200(ticker, date)
-            above = (close > ema) if (close and ema) else None
-            etf_data.append({"scrip": ticker, "sector": etf["sector"], "close": close,
-                             "returns": returns, "prices_ago": prices_ago,
-                             "has_252d": has_252d, "combined": combined, "sharpe": sharpe,
-                             "rsi": rsi_val, "vol": vol, "ema": ema, "above": above})
+    profiles[profile_id] = profile
+    save_profiles(profiles)
 
-        for tf in timeframes:
-            with_r = [x for x in etf_data if x["returns"][tf] is not None]
-            without_r = [x for x in etf_data if x["returns"][tf] is None]
-            for rank, item in enumerate(sorted(with_r, key=lambda x: -x["returns"][tf]), 1):
-                item[f"rank_{tf}"] = rank
-            for rank, item in enumerate(without_r, len(with_r) + 1):
-                item[f"rank_{tf}"] = rank
-        full = sorted([x for x in etf_data if x["has_252d"]], key=lambda x: -x["combined"])
-        partial = sorted([x for x in etf_data if not x["has_252d"]], key=lambda x: -x["combined"])
-        for rank, item in enumerate(full, 1):
-            item["overall_rank"] = rank
-        for rank, item in enumerate(partial, len(full) + 1):
-            item["overall_rank"] = rank
-        sorted_data = full + partial
+    return jsonify({"success": True, "profile": profile})
 
-        if date != actual_start and date in rebal_dates:
-            result = engine.rebalance(portfolio, date, timeframes, weights, False, exit_rank_val)
-            portfolio = result["new_portfolio"]
 
-        for item in sorted_data:
-            row = [date, item["scrip"], item["sector"],
-                   round(item["close"], 2) if item["close"] else ""]
-            for tf in timeframes:
-                p = item["prices_ago"][tf]
-                row.append(round(p, 2) if p is not None else "")
-            for tf in timeframes:
-                r = item["returns"][tf]
-                row.append(round(r * 100, 2) if r is not None else "")
-            for tf in timeframes:
-                row.append(item[f"rank_{tf}"])
-            row += ["YES" if item["has_252d"] else "NO",
-                    round(item["combined"] * 100, 2) if item["combined"] != -999 else "",
-                    item["overall_rank"],
-                    "YES" if item["scrip"] in portfolio else "",
-                    round(item["sharpe"], 2), round(item["rsi"], 1),
-                    round(item["vol"] * 100, 1),
-                    round(item["ema"], 2) if item["ema"] else "",
-                    "YES" if item["above"] else ("NO" if item["above"] is not None else "")]
-            writer.writerow(row)
+@app.route("/api/profiles/<profile_id>", methods=["GET"])
+def get_profile(profile_id):
+    """Get a specific profile."""
+    profiles = load_profiles()
+    if profile_id not in profiles:
+        return jsonify({"error": "Profile not found"}), 404
+    return jsonify(profiles[profile_id])
 
-    output.seek(0)
-    return Response(output.getvalue(), mimetype="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=momentum_rankings.csv"})
+
+@app.route("/api/profiles/<profile_id>", methods=["DELETE"])
+def delete_profile(profile_id):
+    """Delete a profile."""
+    profiles = load_profiles()
+    if profile_id not in profiles:
+        return jsonify({"error": "Profile not found"}), 404
+
+    del profiles[profile_id]
+    save_profiles(profiles)
+
+    return jsonify({"success": True})
+
+
+@app.route("/api/profiles/<profile_id>/run", methods=["POST"])
+def run_profile(profile_id):
+    """Run profile from tracking start date to today (forward test)."""
+    profiles = load_profiles()
+    if profile_id not in profiles:
+        return jsonify({"error": "Profile not found"}), 404
+
+    profile = profiles[profile_id]
+    config = profile["config"].copy()
+    
+    print(f"[PROFILE RUN] Profile: {profile_id}")
+    print(f"[PROFILE RUN] Universe mode: {config.get('universe_mode', 'NOT SET')}")
+    print(f"[PROFILE RUN] ETF universe count: {len(config.get('etf_universe', []))}")
+    print(f"[PROFILE RUN] First 10 ETFs: {config.get('etf_universe', [])[:10]}")
+    
+    # Handle custom ETF universe - convert etf_universe to _custom_etf_list
+    etf_universe = config.get("etf_universe")
+    universe_mode = config.get("universe_mode", "default")
+    
+    if universe_mode == "custom" and etf_universe and isinstance(etf_universe, list) and len(etf_universe) >= 20:
+        # Filter to only include ETFs that exist in our data
+        available_etfs = set(engine.prices.keys())
+        valid_custom = [e for e in etf_universe if e in available_etfs]
+        print(f"[PROFILE RUN] Valid custom ETFs: {len(valid_custom)}")
+        if len(valid_custom) >= 20:
+            config["_custom_etf_list"] = valid_custom
+            print(f"[PROFILE RUN] Set custom ETF list with {len(valid_custom)} ETFs")
+        else:
+            print(f"[PROFILE RUN] Not enough valid ETFs ({len(valid_custom)} < 20), using default")
+    else:
+        print(f"[PROFILE RUN] Using default ETF universe")
+
+    # Set end date to latest available data
+    latest_date = engine.trading_days[-1] if engine.trading_days else "2025-01-01"
+    config["end_date"] = latest_date
+    
+    # Ensure start date is the tracking start date (when profile was created)
+    # This makes it a forward test from that point
+    config["start_date"] = profile.get("tracking_start_date", latest_date)
+    
+    # For forward test, we typically want one-time investment at start
+    # Keep the original investment plan settings
+
+    # Run backtest with the profile config
+    result = engine.run_backtest(config)
+    
+    print(f"[PROFILE RUN] Result universe mode: {result.get('config', {}).get('universe_mode', 'NOT SET')}")
+
+    if "error" in result:
+        return jsonify(result), 400
+
+    return jsonify(result)
 
 
 if __name__ == "__main__":

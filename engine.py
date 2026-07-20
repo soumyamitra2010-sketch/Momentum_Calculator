@@ -98,6 +98,119 @@ class MomentumEngine:
             return None
         return (series[-1] / series[0]) - 1.0
 
+    # ── RSI Calculation ───────────────────────────────────────────────────
+    
+    def calculate_rsi(self, prices: list, period: int = 14) -> float:
+        """
+        Calculate Relative Strength Index (RSI).
+        prices: list of closing prices (ascending chronological order)
+        period: lookback period (default 14 days)
+        returns: RSI value 0-100
+        """
+        if len(prices) < period + 1:
+            return 50.0  # Default neutral if not enough data
+        
+        # Calculate gains and losses
+        gains = []
+        losses = []
+        
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        
+        # Calculate averages over period
+        avg_gain = sum(gains[-period:]) / period if period > 0 else 0
+        avg_loss = sum(losses[-period:]) / period if period > 0 else 0
+        
+        # Calculate RS and RSI
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        
+        rs = avg_gain / avg_loss if avg_loss > 0 else 0
+        rsi = 100 - (100 / (1 + rs)) if rs >= 0 else 0
+        
+        return rsi
+    
+    def get_rsi_for_ticker(self, ticker: str, date: str, period: int = 14) -> float | None:
+        """
+        Get RSI value for ticker on date.
+        """
+        try:
+            prices = self._get_price_series(ticker, date, period + 1)
+            if len(prices) < period + 1:
+                return None
+            return self.calculate_rsi(prices, period)
+        except Exception as e:
+            print(f"RSI calculation error for {ticker}: {e}")
+            return None
+    
+    # ── Volatility Calculation ────────────────────────────────────────────
+    
+    def calculate_volatility(self, ticker: str, date: str, lookback_days: int = 252) -> float:
+        """
+        Calculate annualized volatility (standard deviation of returns).
+        Returns: annualized volatility as decimal (0.20 = 20%)
+        """
+        try:
+            series = self._get_price_series(ticker, date, lookback_days + 1)
+            if len(series) < 2:
+                return 0.20  # Default 20% if no data
+            
+            # Calculate daily returns
+            returns = []
+            for i in range(1, len(series)):
+                if series[i-1] > 0:
+                    daily_return = (series[i] - series[i-1]) / series[i-1]
+                    returns.append(daily_return)
+            
+            if len(returns) < 2:
+                return 0.20
+            
+            # Calculate standard deviation
+            mean_return = sum(returns) / len(returns)
+            variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+            daily_std = math.sqrt(variance)
+            
+            # Annualize (sqrt(252) trading days)
+            annual_volatility = daily_std * math.sqrt(252)
+            
+            return max(annual_volatility, 0.01)  # Minimum 1% volatility
+        except Exception as e:
+            print(f"Volatility calculation error for {ticker}: {e}")
+            return 0.20
+    
+    def calculate_volatility_weights(self, portfolio: list, date: str) -> dict:
+        """
+        Calculate portfolio weights inversely proportional to volatility (risk parity).
+        Lower volatility = higher weight
+        Returns: dict of {ticker: weight} where weights sum to 1.0
+        """
+        if not portfolio:
+            return {}
+        
+        volatilities = {}
+        for ticker in portfolio:
+            vol = self.calculate_volatility(ticker, date)
+            volatilities[ticker] = vol if vol > 0 else 0.20
+        
+        # Inverse volatility weighting
+        inverse_vols = {ticker: 1.0 / volatilities[ticker] for ticker in portfolio}
+        total_inverse_vol = sum(inverse_vols.values())
+        
+        if total_inverse_vol == 0:
+            # Fallback to equal weighting
+            return {ticker: 1.0 / len(portfolio) for ticker in portfolio}
+        
+        # Normalize to sum to 1.0
+        weights = {ticker: inverse_vols[ticker] / total_inverse_vol for ticker in portfolio}
+        
+        return weights
+
     def ema200(self, ticker: str, date: str) -> float | None:
         series = self._get_price_series(ticker, date, 200)
         if len(series) < 200 * 0.95:
@@ -204,7 +317,7 @@ class MomentumEngine:
 
     def rank_universe(self, date: str, timeframes: list, weights: list,
                       ema_filter: bool, custom_universe: list = None,
-                      filter_reversals: bool = False) -> list:
+                      filter_reversals: bool = False, use_rsi: bool = True) -> list:
         """
         Rank ETFs by weighted momentum score.
         Returns list of (ticker, score, sharpe, market_cap) sorted descending.
@@ -213,6 +326,7 @@ class MomentumEngine:
         Args:
             filter_reversals: If True, penalize ETFs in momentum reversal
                             (long-term positive but short-term negative)
+            use_rsi: If True, apply RSI confirmation filter
         """
         candidates = []
         seen_tickers = set()  # Track seen tickers to prevent duplicates
@@ -252,9 +366,25 @@ class MomentumEngine:
             if filter_reversals and self._detect_momentum_reversal(returns, timeframes):
                 score = score * 0.5  # Penalize by 50% if in reversal
             
+            # NEW: Apply RSI confirmation filter (conditional)
+            adjusted_score = score
+            if use_rsi:
+                try:
+                    rsi = self.get_rsi_for_ticker(ticker, date, period=14)
+                    if rsi is not None:
+                        if 30 <= rsi <= 80:
+                            confidence = rsi / 100
+                            adjusted_score = score * (1 + confidence * 0.3)
+                        elif rsi > 80:
+                            adjusted_score = score * 0.7
+                        else:
+                            adjusted_score = score * 0.7
+                except Exception as e:
+                    print(f"RSI filter error for {ticker}: {e}")
+            
             sharpe = self.sharpe_return(ticker, date) or 0.0
             mcap = etf.get("market_cap", 0)
-            candidates.append((ticker, score, sharpe, mcap))
+            candidates.append((ticker, adjusted_score, sharpe, mcap))
 
         # Sort: score desc, tie-break sharpe desc, then market_cap desc
         candidates.sort(key=lambda x: (-x[1], -x[2], -x[3]))
@@ -262,11 +392,11 @@ class MomentumEngine:
 
     def select_portfolio(self, date: str, timeframes: list, weights: list,
                          ema_filter: bool, portfolio_size: int, custom_universe: list = None,
-                         filter_reversals: bool = False) -> list:
+                         filter_reversals: bool = False, use_rsi: bool = True) -> list:
         """
         Select top portfolio_size ETFs by momentum score.
         """
-        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals)
+        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals, use_rsi)
         selected = ranked[:portfolio_size]
         return [ticker for ticker, score, sharpe, mcap in selected]
 
@@ -274,20 +404,35 @@ class MomentumEngine:
 
     def rebalance(self, portfolio: list, date: str, timeframes: list,
                   weights: list, ema_filter: bool, exit_rank: int = 0, custom_universe: list = None,
-                  filter_reversals: bool = False) -> dict:
+                  filter_reversals: bool = False, use_rsi: bool = True, use_regime_adapt: bool = True,
+                  use_vol_weighting: bool = True) -> dict:
         """
         Rebalance portfolio on given date.
         exit_rank: rank threshold above which an ETF is exited. 0 = auto (2x portfolio size).
         filter_reversals: If True, penalize ETFs in momentum reversal pattern.
+        use_rsi: If True, apply RSI confirmation filter.
+        use_regime_adapt: If True, adjust exit strategy by market regime.
+        use_vol_weighting: If True, use volatility weighting instead of equal weights.
         Returns dict with new_portfolio, exits, entries, weights, rankings.
         """
         total_invested = 0  # Track total money invested for SIP metrics
-        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals)
+        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals, use_rsi)
         rank_map = {ticker: i + 1 for i, (ticker, *_) in enumerate(ranked)}
         if exit_rank <= 0:
             exit_rank = 2 * len(portfolio)
 
-        exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > exit_rank]
+        # NEW: Adjust exit threshold based on market regime (conditional)
+        regime_exit_rank = exit_rank
+        if use_regime_adapt:
+            market_regime = self._detect_market_regime(date)
+            if market_regime == "bullish":
+                regime_exit_rank = exit_rank * 1.5
+            elif market_regime == "bearish":
+                regime_exit_rank = exit_rank * 0.5
+            else:
+                regime_exit_rank = exit_rank
+
+        exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > regime_exit_rank]
         
         # Select replacements: pick top unowned candidates
         replacements = []
@@ -296,8 +441,20 @@ class MomentumEngine:
                 replacements.append(ticker)
 
         new_portfolio = [etf for etf in portfolio if etf not in exits] + replacements
-        w = 1.0 / len(new_portfolio) if new_portfolio else 0
-        wts = {etf: w for etf in new_portfolio}
+        
+        # NEW: Use volatility-weighted allocation instead of equal weights (conditional)
+        if use_vol_weighting:
+            volatility_weights = self.calculate_volatility_weights(new_portfolio, date)
+            if volatility_weights:
+                wts = volatility_weights
+            else:
+                # Fallback to equal weighting if volatility calculation fails
+                w = 1.0 / len(new_portfolio) if new_portfolio else 0
+                wts = {etf: w for etf in new_portfolio}
+        else:
+            # Use equal weights if vol weighting disabled
+            w = 1.0 / len(new_portfolio) if new_portfolio else 0
+            wts = {etf: w for etf in new_portfolio}
 
         return {
             "new_portfolio": new_portfolio,
@@ -508,6 +665,9 @@ class MomentumEngine:
         weights = [w / wsum for w in raw_weights]
         ema_filter = config.get("ema_filter", False)
         filter_reversals = config.get("filter_reversals", False)  # NEW: Reversal filter
+        use_rsi = config.get("use_rsi", False)
+        use_regime_adapt = config.get("use_regime_adapt", False)
+        use_vol_weighting = config.get("use_vol_weighting", False)
         portfolio_size = config.get("portfolio_size", 5)
         start_date = config.get("start_date", "2023-01-01")
         end_date = config.get("end_date", "2026-04-18")
@@ -567,7 +727,7 @@ class MomentumEngine:
         # Initial selection
         portfolio = self.select_portfolio(actual_start, timeframes, weights,
                                           ema_filter, portfolio_size, custom_universe,
-                                          filter_reversals)
+                                          filter_reversals, use_rsi)
         if not portfolio:
             return {"error": "No ETFs pass filters on start date"}
 
@@ -609,15 +769,25 @@ class MomentumEngine:
         buy_prices = {}  # {etf: price_at_purchase (weighted avg)}
         buy_dates = {}   # {etf: date_of_purchase}
 
+        def _allocation_weights(holdings: list, allocation_date: str) -> dict:
+            """Return equal or inverse-volatility allocation weights for a cash deployment."""
+            if not holdings:
+                return {}
+            if use_vol_weighting:
+                volatility_weights = self.calculate_volatility_weights(holdings, allocation_date)
+                if volatility_weights and sum(volatility_weights.values()) > 0:
+                    return volatility_weights
+            equal_weight = 1.0 / len(holdings)
+            return {etf: equal_weight for etf in holdings}
+
         if capital > 0:
-            alloc_per_etf = capital / len(portfolio)
+            initial_weights = _allocation_weights(portfolio, actual_start)
             for etf in portfolio:
                 bp = self._get_price(etf, actual_start)
-                units[etf] = alloc_per_etf / bp if bp and bp > 0 else 0
+                allocation = capital * initial_weights[etf]
+                units[etf] = allocation / bp if bp and bp > 0 else 0
                 buy_prices[etf] = bp or 0
                 buy_dates[etf] = actual_start
-        else:
-            alloc_per_etf = 0
 
         def _build_holdings_detail(day):
             """Per-ETF detail: units, buy price, current price, invested, current value, P&L%."""
@@ -658,12 +828,11 @@ class MomentumEngine:
         period_returns_list = []  # Returns between measurement points (not daily)
         total_trades = 0  # Count of entry + exit transactions
 
-        w_init = 1.0 / len(portfolio)
         events.append({
             "date": actual_start,
             "type": "INITIAL_SELECTION",
             "portfolio": list(portfolio),
-            "weights": {etf: round(w_init, 4) for etf in portfolio},
+            "weights": {etf: round(weight, 4) for etf, weight in _allocation_weights(portfolio, actual_start).items()},
             "holdings_detail": _build_holdings_detail(actual_start),
             "capital": round(capital, 2),
         })
@@ -748,7 +917,7 @@ class MomentumEngine:
 
             # Rebalance check
             if is_rebal:
-                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold, custom_universe, filter_reversals)
+                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold, custom_universe, filter_reversals, use_rsi, use_regime_adapt, use_vol_weighting)
                 if result["exits"] or result["entries"]:
                     # Count trades: each exit and each entry is one trade
                     total_trades += len(result["exits"]) + len(result["entries"])
@@ -778,13 +947,14 @@ class MomentumEngine:
                         buy_prices.pop(etf, None)
                         buy_dates.pop(etf, None)
 
-                    # Allocate exit pool equally among new entries
+                    # Allocate exit proceeds to new entries by the configured allocation method.
                     n_entries = len(result["entries"])
                     if n_entries > 0 and exit_pool > 0:
-                        alloc_each = exit_pool / n_entries
+                        entry_weights = _allocation_weights(result["entries"], day)
                         for etf in result["entries"]:
                             bp_r = self._get_price(etf, day)
-                            units[etf] = alloc_each / bp_r if bp_r and bp_r > 0 else 0
+                            allocation = exit_pool * entry_weights[etf]
+                            units[etf] = allocation / bp_r if bp_r and bp_r > 0 else 0
                             buy_prices[etf] = bp_r or 0
                             buy_dates[etf] = day
 
@@ -795,11 +965,11 @@ class MomentumEngine:
                     if sip_amount > 0 and investment_plan in ("sip", "both"):
                         sip_invested_this_month = sip_amount
                         total_invested += sip_amount
-                        sip_alloc = sip_amount / len(portfolio) if portfolio else 0
+                        sip_weights = _allocation_weights(portfolio, day)
                         for etf in portfolio:
                             bp_s = self._get_price(etf, day)
                             if bp_s and bp_s > 0:
-                                new_units = sip_alloc / bp_s
+                                new_units = (sip_amount * sip_weights[etf]) / bp_s
                                 old_units = units.get(etf, 0)
                                 old_cost = old_units * buy_prices.get(etf, 0)
                                 units[etf] = old_units + new_units
@@ -841,11 +1011,11 @@ class MomentumEngine:
                     if sip_amount > 0 and investment_plan in ("sip", "both"):
                         sip_invested_this_month = sip_amount
                         total_invested += sip_amount
-                        sip_alloc = sip_amount / len(portfolio) if portfolio else 0
+                        sip_weights = _allocation_weights(portfolio, day)
                         for etf in portfolio:
                             bp_s = self._get_price(etf, day)
                             if bp_s and bp_s > 0:
-                                new_units = sip_alloc / bp_s
+                                new_units = (sip_amount * sip_weights[etf]) / bp_s
                                 old_units = units.get(etf, 0)
                                 old_cost = old_units * buy_prices.get(etf, 0)
                                 units[etf] = old_units + new_units
@@ -877,11 +1047,11 @@ class MomentumEngine:
             if is_sip_only and sip_amount > 0 and investment_plan == "both":
                 sip_invested_this_date = sip_amount
                 total_invested += sip_amount
-                sip_alloc = sip_amount / len(portfolio) if portfolio else 0
+                sip_weights = _allocation_weights(portfolio, day)
                 for etf in portfolio:
                     bp_s = self._get_price(etf, day)
                     if bp_s and bp_s > 0:
-                        new_units = sip_alloc / bp_s
+                        new_units = (sip_amount * sip_weights[etf]) / bp_s
                         old_units = units.get(etf, 0)
                         old_cost = old_units * buy_prices.get(etf, 0)
                         units[etf] = old_units + new_units
@@ -1095,6 +1265,9 @@ class MomentumEngine:
             "weights": [round(w, 4) for w in weights],
             "ema_filter": ema_filter,
             "filter_reversals": filter_reversals,
+            "use_rsi": use_rsi,
+            "use_regime_adapt": use_regime_adapt,
+            "use_vol_weighting": use_vol_weighting,
             "portfolio_size": portfolio_size,
             "start_date": actual_start,
             "end_date": end_date,

@@ -442,11 +442,58 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
 
     <div class="card">
       <h2>Advanced Options</h2>
+      
+      <!-- RSI Confirmation Filter -->
       <div class="toggle-wrap">
+        <label for="useRSI" style="flex:1;">
+          <strong>RSI Confirmation Filter</strong>
+          <p style="font-size:0.75rem;color:var(--muted);margin-top:4px;">
+            Confirms momentum using Relative Strength Index (RSI). Boosts scores for RSI 30-80 range (valid trends), 
+            discounts overbought (>80) and oversold (<30) conditions. Experimental: validate against your selected period.
+          </p>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="useRSI" onchange="updateRSI()">
+          <span class="slider"></span>
+        </label>
+      </div>
+      
+      <!-- Market Regime Adaptation -->
+      <div class="toggle-wrap" style="margin-top:12px;">
+        <label for="useRegimeAdapt" style="flex:1;">
+          <strong>Market Regime Adaptation</strong>
+          <p style="font-size:0.75rem;color:var(--muted);margin-top:4px;">
+            Adjusts exit strategy based on market regime. Bullish: hold winners longer. Bearish: cut losses faster. 
+            Intended to control drawdowns in downtrends. Experimental: validate against your selected period.
+          </p>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="useRegimeAdapt" onchange="updateRegimeAdapt()">
+          <span class="slider"></span>
+        </label>
+      </div>
+      
+      <!-- Volatility Weighting -->
+      <div class="toggle-wrap" style="margin-top:12px;">
+        <label for="useVolWeighting" style="flex:1;">
+          <strong>Volatility Weighting (Risk Parity)</strong>
+          <p style="font-size:0.75rem;color:var(--muted);margin-top:4px;">
+            Allocates more capital to lower-volatility ETFs by reducing position sizing in risky assets 
+            while maintaining momentum exposure. Experimental: validate against your selected period.
+          </p>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="useVolWeighting" onchange="updateVolWeighting()">
+          <span class="slider"></span>
+        </label>
+      </div>
+      
+      <!-- Reversal Detection -->
+      <div class="toggle-wrap" style="margin-top:12px;">
         <label for="filterReversals" style="flex:1;">
           <strong>Filter Momentum Reversals</strong>
           <p style="font-size:0.75rem;color:var(--muted);margin-top:4px;">
-            When enabled, penalizes ETFs showing reversal pattern (strong long-term gains but recent declines) by 50%. 
+            Penalizes ETFs showing reversal pattern (strong long-term gains but recent declines) by 50%. 
             Useful for avoiding trend reversals and improving portfolio stability.
           </p>
         </label>
@@ -918,8 +965,26 @@ function removeTimeframe(idx) {
 
 renderTimeframes();
 
-// ── Reversal Filter ───────────────────────────────────────────────────
+// ── Feature Toggles (RSI, Regime, Volatility Weighting) ──────────────────
+let useRSI = false;
+let useRegimeAdapt = false;
+let useVolWeighting = false;
 let filterReversals = false;
+
+function updateRSI() {
+  useRSI = document.getElementById('useRSI').checked;
+  console.log('RSI confirmation toggled:', useRSI);
+}
+
+function updateRegimeAdapt() {
+  useRegimeAdapt = document.getElementById('useRegimeAdapt').checked;
+  console.log('Regime adaptation toggled:', useRegimeAdapt);
+}
+
+function updateVolWeighting() {
+  useVolWeighting = document.getElementById('useVolWeighting').checked;
+  console.log('Volatility weighting toggled:', useVolWeighting);
+}
 
 function updateFilterReversals() {
   filterReversals = document.getElementById('filterReversals').checked;
@@ -1460,6 +1525,9 @@ async function runBacktest() {
     weights: tf_weights,
     ema_filter: document.getElementById('emaFilter').checked,
     filter_reversals: document.getElementById('filterReversals').checked,
+    use_rsi: document.getElementById('useRSI').checked,
+    use_regime_adapt: document.getElementById('useRegimeAdapt').checked,
+    use_vol_weighting: document.getElementById('useVolWeighting').checked,
     portfolio_size: +document.getElementById('portfolioSize').value,
     start_date: document.getElementById('startDate').value,
     end_date: document.getElementById('endDate').value || new Date().toISOString().split('T')[0],
@@ -2379,10 +2447,21 @@ function renderProfilesList() {
   let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">';
   profileIds.forEach(id => {
     const p = currentProfiles[id];
+    const config = p.config || {};
     // Show tracking start date (when forward test began)
-    const trackingDate = p.tracking_start_date || p.config.start_date || 'Unknown';
+    const trackingDate = p.tracking_start_date || config.start_date || 'Unknown';
     const daysRunning = trackingDate !== 'Unknown' ? 
       Math.floor((new Date() - new Date(trackingDate)) / (1000 * 60 * 60 * 24)) : 0;
+    const enabledFeatures = [
+      config.use_rsi && 'RSI',
+      config.use_regime_adapt && 'Regime',
+      config.use_vol_weighting && 'Volatility',
+      config.filter_reversals && 'Reversal Filter'
+    ].filter(Boolean);
+    const hasFeatureSettings = ['use_rsi', 'use_regime_adapt', 'use_vol_weighting', 'filter_reversals']
+      .every(key => Object.prototype.hasOwnProperty.call(config, key));
+    const featureSummary = !hasFeatureSettings ? 'Not recorded (legacy profile)' :
+      (enabledFeatures.length ? enabledFeatures.join(' · ') : 'All experimental options off');
     
     html += `
       <div class="card" style="background:var(--bg);cursor:pointer;transition:all 0.2s;" onclick="viewProfile('${id}')" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor=''">
@@ -2394,9 +2473,12 @@ function renderProfilesList() {
           <div><strong>Forward Test Started:</strong> ${trackingDate}</div>
           <div>Created: ${new Date(p.created_at).toLocaleDateString()}</div>
           <div style="margin-top:8px;">
-            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-right:4px;margin-bottom:4px;">${p.config.portfolio_size} ETFs</span>
-            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-right:4px;margin-bottom:4px;">${p.config.frequency}</span>
-            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-bottom:4px;">${p.config.investment_plan}</span>
+            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-right:4px;margin-bottom:4px;">${config.portfolio_size} ETFs</span>
+            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-right:4px;margin-bottom:4px;">${config.frequency}</span>
+            <span style="display:inline-block;background:var(--card);padding:4px 8px;border-radius:4px;margin-bottom:4px;">${config.investment_plan}</span>
+          </div>
+          <div style="margin-top:4px;font-size:0.75rem;color:var(--muted);">
+            <strong>Experimental options:</strong> ${featureSummary}
           </div>
         </div>
       </div>
@@ -2531,6 +2613,16 @@ function displayProfileCriteria(config, profile) {
   const universeMode = config.universe_mode || 'default';
   const etfCount = config.etf_universe ? config.etf_universe.length : (universeMode === 'default' ? 49 : 0);
   const universeColor = universeMode === 'custom' ? 'var(--yellow)' : 'var(--green)';
+  const enabledFeatures = [
+    config.use_rsi && 'RSI Confirmation',
+    config.use_regime_adapt && 'Market Regime Adaptation',
+    config.use_vol_weighting && 'Volatility Weighting',
+    config.filter_reversals && 'Filter Momentum Reversals'
+  ].filter(Boolean);
+  const hasFeatureSettings = ['use_rsi', 'use_regime_adapt', 'use_vol_weighting', 'filter_reversals']
+    .every(key => Object.prototype.hasOwnProperty.call(config, key));
+  const featureSummary = !hasFeatureSettings ? 'Not recorded (legacy profile)' :
+    (enabledFeatures.length ? enabledFeatures.join(', ') : 'All experimental options off');
 
   container.innerHTML = `
     <div><strong style="color:var(--green);">Forward Test Start:</strong> ${trackingDate}</div>
@@ -2544,6 +2636,7 @@ function displayProfileCriteria(config, profile) {
     <div><strong>SIP Amount:</strong> &#8377;${(config.sip_amount || 0).toLocaleString('en-IN')}</div>
     <div><strong>Transaction Cost:</strong> ${config.txn_cost_pct}%</div>
     <div><strong>Exit Rank:</strong> ${config.exit_rank || 'Auto'}</div>
+    <div><strong>Experimental Options:</strong> ${featureSummary}</div>
     <div><strong>ETF Universe:</strong> <span style="color:${universeColor};">${universeMode === 'custom' ? 'Custom (' + etfCount + ' ETFs)' : 'Default (49 ETFs)'}</span></div>
   `;
 }

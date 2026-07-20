@@ -164,10 +164,16 @@ def run_backtest():
     etf_universe = config.get("etf_universe")
     universe_mode = config.get("universe_mode", "default")
     filter_reversals = config.get("filter_reversals", False)
+    use_rsi = config.get("use_rsi", False)
+    use_regime_adapt = config.get("use_regime_adapt", False)
+    use_vol_weighting = config.get("use_vol_weighting", False)
     
     print(f"[DEBUG] Backend received ETF universe: {etf_universe}")
     print(f"[DEBUG] Universe mode: {universe_mode}")
     print(f"[DEBUG] Filter reversals: {filter_reversals}")
+    print(f"[DEBUG] Use RSI: {use_rsi}")
+    print(f"[DEBUG] Use Regime Adaptation: {use_regime_adapt}")
+    print(f"[DEBUG] Use Volatility Weighting: {use_vol_weighting}")
     print(f"[DEBUG] ETF universe type: {type(etf_universe)}")
     
     if etf_universe and isinstance(etf_universe, list) and len(etf_universe) >= 20:

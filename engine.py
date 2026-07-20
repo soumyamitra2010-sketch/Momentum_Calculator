@@ -168,6 +168,105 @@ class MomentumEngine:
         
         return False
 
+    def _detect_market_regime(self, date: str) -> str:
+        """
+        Detect overall market regime (bullish/bearish/neutral).
+        Returns 'bullish', 'bearish', or 'neutral'.
+        
+        Method:
+        - Calculate weighted momentum of Nifty 50 benchmark
+        - If 252d > 0 AND 50d > 0: Bullish (uptrend)
+        - If 252d > 0 AND 50d < 0: Bearish (reversal/downtrend)
+        - Otherwise: Neutral
+        """
+        benchmark = "Nifty 50"
+        ret_252 = self.return_over(benchmark, date, 252)
+        ret_50 = self.return_over(benchmark, date, 50)
+        
+        if ret_252 is None or ret_50 is None:
+            return "neutral"
+        
+        # Bullish: Long-term AND short-term both positive
+        if ret_252 > 0 and ret_50 > 0:
+            return "bullish"
+        
+        # Bearish: Long-term positive BUT short-term negative (or both negative)
+        if ret_252 > 0 and ret_50 < 0:
+            return "bearish"
+        
+        # Bearish if both negative
+        if ret_252 < 0 and ret_50 < 0:
+            return "bearish"
+        
+        return "neutral"
+
+    def _get_sector_stats(self, date: str, timeframes: list, weights: list,
+                          ema_filter: bool, candidates: list) -> dict:
+        """
+        Calculate sector statistics from ranked candidates.
+        Returns dict with sector -> list of (ticker, score) tuples.
+        """
+        sector_map = {}
+        for ticker, score, sharpe, mcap in candidates:
+            sector = self.etf_meta.get(ticker, {}).get("sector", "Unknown")
+            if sector not in sector_map:
+                sector_map[sector] = []
+            sector_map[sector].append((ticker, score))
+        
+        return sector_map
+
+    def select_portfolio_with_sector_limits(self, date: str, timeframes: list, weights: list,
+                                           ema_filter: bool, portfolio_size: int, 
+                                           custom_universe: list = None,
+                                           filter_reversals: bool = False,
+                                           max_sector_weight: float = 0.20) -> list:
+        """
+        Select portfolio with sector concentration limits.
+        
+        Args:
+            max_sector_weight: Maximum weight allowed per sector (0.0-1.0)
+                              Default: 0.20 (20% max per sector)
+        
+        Strategy:
+        1. Get ranked universe
+        2. Distribute portfolio across sectors respecting max_sector_weight
+        3. Pick top candidates from each sector until portfolio is full
+        """
+        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals)
+        
+        # Build sector map
+        sector_map = {}
+        for ticker, score, sharpe, mcap in ranked:
+            sector = self.etf_meta.get(ticker, {}).get("sector", "Unknown")
+            if sector not in sector_map:
+                sector_map[sector] = []
+            sector_map[sector].append(ticker)
+        
+        # Allocate portfolio respecting sector limits
+        portfolio = []
+        sector_weights = {sector: 0 for sector in sector_map}
+        max_per_sector = max(1, int(portfolio_size * max_sector_weight))
+        
+        # Round 1: Pick top candidate from each sector (diversification)
+        for sector in sorted(sector_map.keys()):
+            if len(portfolio) < portfolio_size and sector_map[sector]:
+                ticker = sector_map[sector][0]
+                portfolio.append(ticker)
+                sector_weights[sector] += 1
+        
+        # Round 2: Fill remaining slots respecting sector limits
+        for ticker, *_ in ranked:
+            if len(portfolio) >= portfolio_size:
+                break
+            if ticker in portfolio:
+                continue
+            sector = self.etf_meta.get(ticker, {}).get("sector", "Unknown")
+            if sector_weights.get(sector, 0) < max_per_sector:
+                portfolio.append(ticker)
+                sector_weights[sector] = sector_weights.get(sector, 0) + 1
+        
+        return portfolio
+
     def rank_universe(self, date: str, timeframes: list, weights: list,
                       ema_filter: bool, custom_universe: list = None,
                       filter_reversals: bool = False) -> list:
@@ -228,20 +327,38 @@ class MomentumEngine:
 
     def select_portfolio(self, date: str, timeframes: list, weights: list,
                          ema_filter: bool, portfolio_size: int, custom_universe: list = None,
-                         filter_reversals: bool = False) -> list:
-        ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals)
-        selected = ranked[:portfolio_size]
-        return [ticker for ticker, score, sharpe, mcap in selected]
+                         filter_reversals: bool = False, apply_sector_limits: bool = True,
+                         max_sector_weight: float = 0.20) -> list:
+        """
+        Select portfolio with optional sector concentration limits.
+        
+        Args:
+            apply_sector_limits: If True, enforce max sector weight constraints
+            max_sector_weight: Maximum portfolio weight per sector (default 20%)
+        """
+        if apply_sector_limits:
+            return self.select_portfolio_with_sector_limits(
+                date, timeframes, weights, ema_filter, portfolio_size,
+                custom_universe, filter_reversals, max_sector_weight
+            )
+        else:
+            # Legacy behavior: simple top-N selection
+            ranked = self.rank_universe(date, timeframes, weights, ema_filter, custom_universe, filter_reversals)
+            selected = ranked[:portfolio_size]
+            return [ticker for ticker, score, sharpe, mcap in selected]
 
     # ── Rebalancing ───────────────────────────────────────────────────────
 
     def rebalance(self, portfolio: list, date: str, timeframes: list,
                   weights: list, ema_filter: bool, exit_rank: int = 0, custom_universe: list = None,
-                  filter_reversals: bool = False) -> dict:
+                  filter_reversals: bool = False, apply_sector_limits: bool = True,
+                  max_sector_weight: float = 0.20) -> dict:
         """
         Rebalance portfolio on given date.
         exit_rank: rank threshold above which an ETF is exited. 0 = auto (2x portfolio size).
         filter_reversals: If True, penalize ETFs in momentum reversal pattern.
+        apply_sector_limits: If True, enforce max sector weight constraints.
+        max_sector_weight: Maximum portfolio weight per sector (default 0.20 = 20%).
         Returns dict with new_portfolio, exits, entries, weights, rankings.
         """
         total_invested = 0  # Track total money invested for SIP metrics
@@ -251,10 +368,44 @@ class MomentumEngine:
             exit_rank = 2 * len(portfolio)
 
         exits = [etf for etf in portfolio if rank_map.get(etf, len(ranked) + 1) > exit_rank]
-        replacements = []
-        for ticker, *_ in ranked:
-            if ticker not in portfolio and len(replacements) < len(exits):
-                replacements.append(ticker)
+        
+        # Select replacements with sector limits
+        if apply_sector_limits:
+            # Use sector-limited selection for replacements
+            candidates_tickers = [t for t, *_ in ranked]
+            sector_map = {}
+            for ticker in candidates_tickers:
+                sector = self.etf_meta.get(ticker, {}).get("sector", "Unknown")
+                if sector not in sector_map:
+                    sector_map[sector] = []
+                sector_map[sector].append(ticker)
+            
+            max_per_sector = max(1, int(len(portfolio) * max_sector_weight))
+            
+            # Start with existing (non-exiting) ETFs
+            current_kept = [e for e in portfolio if e not in exits]
+            sector_counts = {}
+            for e in current_kept:
+                s = self.etf_meta.get(e, {}).get("sector", "Unknown")
+                sector_counts[s] = sector_counts.get(s, 0) + 1
+            
+            replacements = []
+            # Pick from highest-ranked candidates
+            for ticker in candidates_tickers:
+                if len(replacements) >= len(exits):
+                    break
+                if ticker in portfolio:
+                    continue
+                sector = self.etf_meta.get(ticker, {}).get("sector", "Unknown")
+                if sector_counts.get(sector, 0) < max_per_sector:
+                    replacements.append(ticker)
+                    sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        else:
+            # Legacy behavior: simple top replacements
+            replacements = []
+            for ticker, *_ in ranked:
+                if ticker not in portfolio and len(replacements) < len(exits):
+                    replacements.append(ticker)
 
         new_portfolio = [etf for etf in portfolio if etf not in exits] + replacements
         w = 1.0 / len(new_portfolio) if new_portfolio else 0
@@ -462,6 +613,8 @@ class MomentumEngine:
             frequency: str ('weekly'|'monthly'|'quarterly'), rebal_day: int,
             initial_capital: float, transaction_cost_pct: float,
             filter_reversals: bool (penalize momentum reversals)
+            apply_sector_limits: bool (enforce max sector weight)
+            max_sector_weight: float (max weight per sector, default 0.20)
         """
         timeframes = config.get("timeframes", [252, 50, 20])
         raw_weights = config.get("weights", [1, 1, 1])
@@ -469,6 +622,8 @@ class MomentumEngine:
         weights = [w / wsum for w in raw_weights]
         ema_filter = config.get("ema_filter", False)
         filter_reversals = config.get("filter_reversals", False)  # NEW: Reversal filter
+        apply_sector_limits = config.get("apply_sector_limits", True)  # NEW: Sector concentration
+        max_sector_weight = config.get("max_sector_weight", 0.20)  # NEW: Max sector weight (20%)
         portfolio_size = config.get("portfolio_size", 5)
         start_date = config.get("start_date", "2023-01-01")
         end_date = config.get("end_date", "2026-04-18")
@@ -528,7 +683,7 @@ class MomentumEngine:
         # Initial selection
         portfolio = self.select_portfolio(actual_start, timeframes, weights,
                                           ema_filter, portfolio_size, custom_universe,
-                                          filter_reversals)
+                                          filter_reversals, apply_sector_limits, max_sector_weight)
         if not portfolio:
             return {"error": "No ETFs pass filters on start date"}
 
@@ -709,7 +864,7 @@ class MomentumEngine:
 
             # Rebalance check
             if is_rebal:
-                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold, custom_universe, filter_reversals)
+                result = self.rebalance(portfolio, day, timeframes, weights, ema_filter, exit_rank_threshold, custom_universe, filter_reversals, apply_sector_limits, max_sector_weight)
                 if result["exits"] or result["entries"]:
                     # Count trades: each exit and each entry is one trade
                     total_trades += len(result["exits"]) + len(result["entries"])
@@ -1046,12 +1201,18 @@ class MomentumEngine:
             equity_curve, benchmark_curves, events, effective_invested
         )
 
+        # Detect market regime on start and end dates
+        start_regime = self._detect_market_regime(actual_start)
+        end_regime = self._detect_market_regime(end_date)
+
         # Build the config dict for the result
         result_config = {
             "timeframes": timeframes,
             "weights": [round(w, 4) for w in weights],
             "ema_filter": ema_filter,
             "filter_reversals": filter_reversals,
+            "apply_sector_limits": apply_sector_limits,
+            "max_sector_weight": max_sector_weight,
             "portfolio_size": portfolio_size,
             "start_date": actual_start,
             "end_date": end_date,
@@ -1062,6 +1223,10 @@ class MomentumEngine:
             "exit_rank": exit_rank_threshold,
             "investment_plan": investment_plan,
             "sip_amount": sip_amount,
+            "market_regime": {
+                "start_date": start_regime,
+                "end_date": end_regime
+            }
         }
         
         # Add custom universe info if it was used

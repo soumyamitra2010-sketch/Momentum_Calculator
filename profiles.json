@@ -1,0 +1,61 @@
+{
+  "profile_20260503_215500": {
+    "id": "profile_20260503_215500",
+    "name": "Test2",
+    "config": {
+      "ema_filter": false,
+      "end_date": "2026-05-01",
+      "exit_rank": 0,
+      "frequency": "monthly",
+      "investment_plan": "onetime",
+      "portfolio_size": 5,
+      "rebal_day": 1,
+      "sip_amount": 0,
+      "start_date": "2026-05-01",
+      "timeframes": [
+        252,
+        50,
+        20
+      ],
+      "txn_cost_pct": 0,
+      "weights": [
+        0.3333,
+        0.3333,
+        0.3333
+      ]
+    },
+    "created_at": "2026-05-03T21:55:00.530913",
+    "tracking_start_date": "2026-05-01",
+    "original_backtest_start": "2023-06-01"
+  },
+  "profile_20260505_195014": {
+    "id": "profile_20260505_195014",
+    "name": "Test3",
+    "config": {
+      "ema_filter": false,
+      "end_date": "2026-05-05",
+      "exit_rank": 10,
+      "frequency": "monthly",
+      "initial_capital": 678000,
+      "investment_plan": "onetime",
+      "portfolio_size": 5,
+      "rebal_day": 21,
+      "sip_amount": 0,
+      "start_date": "2026-05-05",
+      "timeframes": [
+        252,
+        50,
+        20
+      ],
+      "txn_cost_pct": 0,
+      "weights": [
+        0.3333,
+        0.3333,
+        0.3333
+      ]
+    },
+    "created_at": "2026-05-05T19:50:14.916409",
+    "tracking_start_date": "2026-05-05",
+    "original_backtest_start": "2023-01-02"
+  }
+}

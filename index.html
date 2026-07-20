@@ -455,6 +455,26 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
           <span class="slider"></span>
         </label>
       </div>
+      <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px;">
+        <div class="toggle-wrap">
+          <label for="applySectorLimits" style="flex:1;">
+            <strong>Apply Sector Concentration Limits</strong>
+            <p style="font-size:0.75rem;color:var(--muted);margin-top:4px;">
+              Enforces maximum portfolio weight per sector to prevent over-concentration. 
+              Improves diversification and reduces drawdown risk.
+            </p>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="applySectorLimits" checked onchange="updateSectorLimits()">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="form-group" style="margin-top:16px;">
+          <label>Max Sector Weight (%)</label>
+          <input type="number" id="maxSectorWeight" value="20" min="10" max="50" step="5">
+          <span style="font-size:0.7rem;color:var(--muted)">Percentage limit per sector (10-50%)</span>
+        </div>
+      </div>
     </div>
 
     <button class="btn" id="runBtn" onclick="runBacktest()">
@@ -924,6 +944,16 @@ let filterReversals = false;
 function updateFilterReversals() {
   filterReversals = document.getElementById('filterReversals').checked;
   console.log('Reversal filter toggled:', filterReversals);
+}
+
+// ── Sector Limits ────────────────────────────────────────────────────
+let applySectorLimits = true;
+let maxSectorWeight = 0.20;  // 20% default
+
+function updateSectorLimits() {
+  applySectorLimits = document.getElementById('applySectorLimits').checked;
+  maxSectorWeight = parseInt(document.getElementById('maxSectorWeight').value) / 100;
+  console.log('Sector limits:', { applySectorLimits, maxSectorWeight });
 }
 
 // ── ETF Universe Functions ───────────────────────────────────────────────
@@ -1460,6 +1490,8 @@ async function runBacktest() {
     weights: tf_weights,
     ema_filter: document.getElementById('emaFilter').checked,
     filter_reversals: document.getElementById('filterReversals').checked,
+    apply_sector_limits: document.getElementById('applySectorLimits').checked,
+    max_sector_weight: parseInt(document.getElementById('maxSectorWeight').value) / 100,
     portfolio_size: +document.getElementById('portfolioSize').value,
     start_date: document.getElementById('startDate').value,
     end_date: document.getElementById('endDate').value || new Date().toISOString().split('T')[0],

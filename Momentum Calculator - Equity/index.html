@@ -1,0 +1,1315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Momentum ETF Calculator</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117;
+  --card: #1a1d29;
+  --border: #2a2d3a;
+  --text: #e1e4ea;
+  --muted: #8b8fa3;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #eab308;
+  --blue: #3b82f6;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.5;
+}
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+/* Header */
+header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+header h1 { font-size: 1.6rem; font-weight: 700; }
+header h1 span { color: var(--accent); }
+.badge { background: var(--accent); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
+.tab-btn {
+  background: none; border: none; color: var(--muted); padding: 10px 20px;
+  cursor: pointer; font-size: 0.9rem; border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Cards */
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px; margin-bottom: 20px;
+}
+.card h2 { font-size: 1.1rem; margin-bottom: 16px; color: var(--text); }
+.card h3 { font-size: 0.95rem; margin-bottom: 12px; color: var(--muted); }
+
+/* Form grid */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.form-group input, .form-group select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 12px; border-radius: 8px; font-size: 0.9rem;
+}
+.form-group input:focus, .form-group select:focus {
+  outline: none; border-color: var(--accent);
+}
+
+/* Checkbox toggle */
+.toggle-wrap { display: flex; align-items: center; gap: 10px; padding-top: 22px; }
+.toggle {
+  position: relative; width: 44px; height: 24px; cursor: pointer;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle .slider {
+  position: absolute; inset: 0; background: var(--border); border-radius: 12px; transition: 0.3s;
+}
+.toggle .slider::before {
+  content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px;
+  background: var(--text); border-radius: 50%; transition: 0.3s;
+}
+.toggle input:checked + .slider { background: var(--accent); }
+.toggle input:checked + .slider::before { transform: translateX(20px); }
+
+/* Buttons */
+.btn {
+  background: var(--accent); color: #fff; border: none; padding: 10px 24px;
+  border-radius: 8px; font-size: 0.9rem; cursor: pointer; font-weight: 600;
+  transition: background 0.2s; display: inline-flex; align-items: center; gap: 8px;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: var(--border); }
+.btn-secondary:hover { background: #3a3d4a; }
+
+/* Metrics row */
+.metrics-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.metric-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; text-align: center;
+}
+.metric-card .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+.metric-card .value { font-size: 1.3rem; font-weight: 700; }
+.metric-card .value.positive { color: var(--green); }
+.metric-card .value.negative { color: var(--red); }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+thead th {
+  text-align: left; padding: 10px 12px; background: var(--bg); color: var(--muted);
+  font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; cursor: pointer;
+}
+thead th:hover { color: var(--text); }
+tbody td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
+.in-portfolio { background: rgba(99, 102, 241, 0.08) !important; }
+
+/* Chart container */
+.chart-container { position: relative; height: 380px; margin: 16px 0; }
+
+/* Events timeline */
+.timeline { max-height: 500px; overflow-y: auto; }
+.event-item {
+  display: flex; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.event-date { min-width: 100px; color: var(--accent); font-weight: 600; font-size: 0.85rem; }
+.event-type {
+  display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.75rem;
+  font-weight: 600; margin-bottom: 4px;
+}
+.event-type.INITIAL_SELECTION { background: rgba(99, 102, 241, 0.2); color: var(--accent); }
+.event-type.REBALANCE { background: rgba(234, 179, 8, 0.2); color: var(--yellow); }
+.event-type.REBALANCE_NO_CHANGE { background: rgba(139, 143, 163, 0.2); color: var(--muted); }
+.event-detail { font-size: 0.85rem; color: var(--muted); }
+.event-detail .exit { color: var(--red); }
+.event-detail .entry { color: var(--green); }
+
+/* Loading */
+.spinner {
+  display: inline-block; width: 20px; height: 20px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 17, 23, 0.85); display: flex; align-items: center;
+  justify-content: center; z-index: 1000; flex-direction: column; gap: 16px;
+}
+.loading-overlay.hidden { display: none; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--border);
+  padding: 12px 20px; border-radius: 10px; font-size: 0.85rem; z-index: 1001;
+  transform: translateY(100px); opacity: 0; transition: all 0.3s;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.error { border-color: var(--red); }
+
+/* Date input with calendar icon */
+.date-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.date-input-wrap input[type="date"] {
+  flex: 1;
+  padding-right: 36px;
+}
+.calendar-icon {
+  position: absolute;
+  right: 10px;
+  cursor: pointer;
+  font-size: 1.1rem;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  user-select: none;
+}
+.calendar-icon:hover {
+  opacity: 1;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .form-grid { grid-template-columns: 1fr 1fr; }
+  .metrics-row { grid-template-columns: 1fr 1fr; }
+  header h1 { font-size: 1.2rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <h1><span>&#9650;</span> Momentum ETF Calculator</h1>
+    <span class="badge">v1.0</span>
+  </header>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="config">Configuration</button>
+    <button class="tab-btn" data-tab="results">Results</button>
+    <button class="tab-btn" data-tab="universe">Universe</button>
+    <button class="tab-btn" data-tab="events">Events Log</button>
+    <button class="tab-btn" data-tab="monthly">Monthly View</button>
+  </div>
+
+  <!-- ═══════════ CONFIG TAB ═══════════ -->
+  <div id="tab-config" class="tab-panel active">
+    <div class="card">
+      <h2>Backtest Configuration</h2>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Start Date</label>
+          <div class="date-input-wrap">
+            <input type="date" id="startDate" value="2023-06-01" min="2020-01-01" max="2026-12-31">
+            <span class="calendar-icon" onclick="document.getElementById('startDate').showPicker()">&#128197;</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>End Date</label>
+          <div class="date-input-wrap">
+            <input type="date" id="endDate" value="" min="2020-01-01" max="2026-12-31">
+            <span class="calendar-icon" onclick="document.getElementById('endDate').showPicker()">&#128197;</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Portfolio Size</label>
+          <select id="portfolioSize">
+            <option value="5" selected>5 ETFs</option>
+            <option value="6">6 ETFs</option>
+            <option value="7">7 ETFs</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Rebalance Frequency</label>
+          <select id="frequency">
+            <option value="weekly">Weekly</option>
+            <option value="monthly" selected>Monthly</option>
+            <option value="quarterly">Quarterly</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Rebalance Day</label>
+          <input type="number" id="rebalDay" value="1" min="0" max="60">
+          <span style="font-size:0.7rem;color:var(--muted)">Monthly: 1-28 | Weekly: 0(Mon)-4(Fri) | Quarterly: 1-60</span>
+        </div>
+        <div class="form-group">
+          <label>Investment Plan</label>
+          <select id="investmentPlan" onchange="togglePlanFields()">
+            <option value="onetime" selected>One Time Investment</option>
+            <option value="sip">SIP</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div class="form-group" id="initialCapitalGroup">
+          <label id="initialCapitalLabel">Initial Capital (₹)</label>
+          <input type="number" id="initialCapital" value="1000000" min="10000" step="10000">
+        </div>
+        <div class="form-group" id="sipAmountGroup" style="display:none">
+          <label>SIP Amount (₹ each Month)</label>
+          <input type="number" id="sipAmount" value="50000" min="1000" step="1000">
+        </div>
+        <div class="form-group">
+          <label>Transaction Cost (%)</label>
+          <input type="number" id="txnCost" value="0" min="0" max="2" step="0.01">
+        </div>
+        <div class="form-group">
+          <label>Exit Rank Threshold</label>
+          <input type="number" id="exitRank" value="0" min="0" max="49" step="1">
+          <span style="font-size:0.7rem;color:var(--muted)">ETFs ranked below this are exited. 0 = auto (2× portfolio size)</span>
+        </div>
+        <div class="toggle-wrap">
+          <label class="toggle">
+            <input type="checkbox" id="emaFilter">
+            <span class="slider"></span>
+          </label>
+          <span style="font-size:0.85rem;">200-day EMA Filter</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Timeframes &amp; Weights</h2>
+      <p style="font-size:0.8rem;color:var(--muted);margin-bottom:12px;">
+        Configure return lookback windows and their relative importance in the momentum score.
+      </p>
+      <div id="timeframeRows"></div>
+      <button class="btn btn-secondary" style="margin-top:12px;" onclick="addTimeframe()">+ Add Timeframe</button>
+    </div>
+
+    <button class="btn" id="runBtn" onclick="runBacktest()">
+      &#9654; Run Backtest
+    </button>
+  </div>
+
+  <!-- ═══════════ RESULTS TAB ═══════════ -->
+  <div id="tab-results" class="tab-panel">
+    <div id="noResults" class="card" style="text-align:center;padding:60px 20px;">
+      <p style="color:var(--muted);font-size:1.1rem;">Run a backtest to see results here.</p>
+    </div>
+    <div id="resultsContent" style="display:none;">
+      <div class="metrics-row" id="metricsRow"></div>
+      <div class="card">
+        <h2>Equity Curve</h2>
+        <div id="bmSelectorDaily" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;font-size:0.82rem;"></div>
+        <div class="chart-container">
+          <canvas id="equityChart"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Final Portfolio</h2>
+        <div class="table-wrap">
+          <table id="portfolioTable">
+            <thead><tr>
+              <th>#</th><th>Scrip</th><th>Sector</th><th>Units</th><th>Buy Price</th><th>Buy Date</th>
+              <th>Current Price</th><th>Invested (₹)</th><th>Current Value (₹)</th>
+              <th>P&amp;L%</th><th>Weight</th><th>Rank</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ UNIVERSE TAB ═══════════ -->
+  <div id="tab-universe" class="tab-panel">
+    <div id="noUniverse" class="card" style="text-align:center;padding:60px 20px;">
+      <p style="color:var(--muted);font-size:1.1rem;">Run a backtest to see the full ranked universe.</p>
+    </div>
+    <div id="universeContent" style="display:none;">
+      <div class="card">
+        <h2>ETF Universe Rankings</h2>
+        <div class="table-wrap" style="max-height:600px;overflow-y:auto;">
+          <table id="universeTable">
+            <thead><tr>
+              <th>Rank</th><th>Scrip</th><th>Sector</th><th>Score</th>
+              <th>Sharpe</th><th>RSI</th><th>Vol %</th><th>In Portfolio</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ EVENTS TAB ═══════════ -->
+  <div id="tab-events" class="tab-panel">
+    <div id="noEvents" class="card" style="text-align:center;padding:60px 20px;">
+      <p style="color:var(--muted);font-size:1.1rem;">Run a backtest to see rebalancing events.</p>
+    </div>
+    <div id="eventsContent" style="display:none;">
+      <div class="card">
+        <h2>Rebalancing Timeline</h2>
+        <div class="timeline" id="eventsTimeline"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ MONTHLY VIEW TAB ═══════════ -->
+  <div id="tab-monthly" class="tab-panel">
+    <div id="noMonthly" class="card" style="text-align:center;padding:60px 20px;">
+      <p style="color:var(--muted);font-size:1.1rem;">Run a backtest to see the monthly view.</p>
+    </div>
+    <div id="monthlyContent" style="display:none;">
+      <!-- Monthly Equity Chart -->
+      <div class="card">
+        <h2>Monthly Equity Curve</h2>
+        <div id="bmSelectorMonthly" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;font-size:0.82rem;"></div>
+        <div class="chart-container">
+          <canvas id="monthlyEquityChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Month Selector -->
+      <div class="card">
+        <h2>Month Explorer</h2>
+        <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;">
+          <div class="form-group" style="min-width:220px;">
+            <label>Select Month</label>
+            <select id="monthSelector">
+              <option value="">-- Select a month --</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Month Detail: Portfolio -->
+        <div id="monthDetail" style="display:none;">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+            <div>
+              <h3 style="margin-bottom:12px;color:var(--accent);">
+                &#128188; Running Portfolio for <span id="monthLabel"></span>
+              </h3>
+              <div class="table-wrap" style="max-height:400px;overflow-y:auto;">
+                <table id="monthPortfolioTable">
+                  <thead><tr>
+                    <th>#</th><th>Scrip</th><th>Units</th><th>Buy Price</th><th>Cur Price</th><th>Cur Value (₹)</th><th>P&amp;L%</th><th>Weight</th><th>Rank</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div id="monthMetrics" style="margin-top:16px;"></div>
+            </div>
+            <div>
+              <h3 style="margin-bottom:12px;color:var(--yellow);">
+                &#128196; Event Log for <span id="monthLabel2"></span>
+              </h3>
+              <div id="monthEventsTimeline" class="timeline" style="max-height:400px;overflow-y:auto;"></div>
+              <div id="noMonthEvents" style="display:none;padding:20px;text-align:center;color:var(--muted);font-size:0.9rem;">
+                No rebalancing events in this month.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Monthly Validation Table -->
+      <div class="card">
+        <h2>&#9989; Monthly Data Validation</h2>
+        <p style="font-size:0.8rem;color:var(--muted);margin-bottom:12px;">
+          Month-on-month comparison for cross-checking. Values should match the equity curve and events log exactly.
+        </p>
+        <div class="table-wrap" style="max-height:600px;overflow-y:auto;">
+          <table id="validationTable" style="font-size:0.8rem;">
+            <thead><tr id="validationTableHead"></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay hidden" id="loadingOverlay">
+  <div class="spinner" style="width:40px;height:40px;border-width:3px;"></div>
+  <p>Running backtest simulation...</p>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api';
+let equityChartInstance = null;
+let lastResult = null;
+
+// ── Tabs ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Timeframe Rows ───────────────────────────────────────────────────
+const defaultTFs = [{window: 252, weight: 1}, {window: 50, weight: 1}, {window: 20, weight: 1}];
+let timeframes = [...defaultTFs];
+
+function renderTimeframes() {
+  const container = document.getElementById('timeframeRows');
+  container.innerHTML = '';
+  timeframes.forEach((tf, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:12px;align-items:center;margin-bottom:8px;';
+    row.innerHTML = `
+      <div class="form-group" style="flex:1;">
+        <label>Window (days)</label>
+        <input type="number" value="${tf.window}" min="5" max="500"
+               onchange="timeframes[${i}].window=+this.value">
+      </div>
+      <div class="form-group" style="flex:1;">
+        <label>Weight</label>
+        <input type="number" value="${tf.weight}" min="0" max="10" step="0.1"
+               onchange="timeframes[${i}].weight=+this.value">
+      </div>
+      <button class="btn btn-secondary" style="margin-top:20px;padding:6px 12px;"
+              onclick="removeTimeframe(${i})" ${timeframes.length <= 1 ? 'disabled' : ''}>&#10005;</button>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function addTimeframe() {
+  timeframes.push({window: 30, weight: 1});
+  renderTimeframes();
+}
+
+function removeTimeframe(idx) {
+  if (timeframes.length > 1) {
+    timeframes.splice(idx, 1);
+    renderTimeframes();
+  }
+}
+
+renderTimeframes();
+
+// ── Fetch available date range from API on page load ─────────────────
+(async function initDates() {
+  try {
+    const resp = await fetch(API + '/info');
+    const info = await resp.json();
+    if (info.last_date) {
+      document.getElementById('endDate').value = info.last_date;
+    } else {
+      document.getElementById('endDate').value = new Date().toISOString().split('T')[0];
+    }
+  } catch (e) {
+    document.getElementById('endDate').value = new Date().toISOString().split('T')[0];
+  }
+})();
+
+// ── Plan Toggle ──────────────────────────────────────────────────────
+function togglePlanFields() {
+  const plan = document.getElementById('investmentPlan').value;
+  const icGroup = document.getElementById('initialCapitalGroup');
+  const sipGroup = document.getElementById('sipAmountGroup');
+  const icLabel = document.getElementById('initialCapitalLabel');
+  if (plan === 'onetime') {
+    icGroup.style.display = '';
+    sipGroup.style.display = 'none';
+    icLabel.textContent = 'Initial Capital (₹)';
+  } else if (plan === 'sip') {
+    icGroup.style.display = 'none';
+    sipGroup.style.display = '';
+  } else { // both
+    icGroup.style.display = '';
+    sipGroup.style.display = '';
+    icLabel.textContent = 'Initial Capital (₹)';
+  }
+}
+
+// ── Toast ────────────────────────────────────────────────────────────
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  setTimeout(() => t.className = 'toast', 4000);
+}
+
+// ── Run Backtest ─────────────────────────────────────────────────────
+async function runBacktest() {
+  const plan = document.getElementById('investmentPlan').value;
+  const config = {
+    timeframes: timeframes.map(t => t.window),
+    weights: timeframes.map(t => t.weight),
+    ema_filter: document.getElementById('emaFilter').checked,
+    portfolio_size: +document.getElementById('portfolioSize').value,
+    start_date: document.getElementById('startDate').value,
+    end_date: document.getElementById('endDate').value,
+    frequency: document.getElementById('frequency').value,
+    rebal_day: +document.getElementById('rebalDay').value,
+    initial_capital: plan === 'sip' ? 0 : +document.getElementById('initialCapital').value,
+    transaction_cost_pct: +document.getElementById('txnCost').value,
+    exit_rank: +document.getElementById('exitRank').value,
+    investment_plan: plan,
+    sip_amount: (plan === 'sip' || plan === 'both') ? +document.getElementById('sipAmount').value : 0,
+  };
+
+  document.getElementById('loadingOverlay').classList.remove('hidden');
+  document.getElementById('runBtn').disabled = true;
+
+  try {
+    const resp = await fetch(API + '/backtest', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(config),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      showToast(data.error, true);
+      return;
+    }
+
+    lastResult = data;
+    renderResults(data);
+    renderUniverse(data);
+    renderEvents(data);
+    renderMonthlyView(data);
+
+    // Switch to results tab
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelector('[data-tab="results"]').classList.add('active');
+    document.getElementById('tab-results').classList.add('active');
+
+    showToast('Backtest complete!');
+  } catch (err) {
+    showToast('Error: ' + err.message, true);
+  } finally {
+    document.getElementById('loadingOverlay').classList.add('hidden');
+    document.getElementById('runBtn').disabled = false;
+  }
+}
+
+// ── Render Results ───────────────────────────────────────────────────
+function renderResults(data) {
+  document.getElementById('noResults').style.display = 'none';
+  document.getElementById('resultsContent').style.display = 'block';
+
+  const m = data.metrics;
+  const investedLabel = m.investment_plan === 'onetime' ? 'Initial Capital' :
+                        m.investment_plan === 'sip' ? 'Total SIP Invested' : 'Total Invested (Lump + SIP)';
+  const investedValue = m.investment_plan === 'onetime' ? m.initial_capital : m.total_invested;
+  const metricsConfig = [
+    {label: 'Total Return', value: m.total_return + '%', positive: m.total_return >= 0},
+    {label: 'CAGR', value: m.cagr + '%', positive: m.cagr >= 0},
+    {label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), positive: m.sharpe >= 1},
+    {label: 'Max Drawdown', value: m.max_drawdown + '%', positive: false, 
+     subtitle: m.max_drawdown_date ? '(' + m.max_drawdown_date.substring(0, 7) + ')' : ''},
+    {label: 'Win Rate', value: m.win_rate + '%', positive: m.win_rate >= 50},
+    {label: 'Ann. Volatility', value: m.annualised_volatility + '%', positive: false},
+    {label: 'Beta', value: m.beta.toFixed(2), positive: true},
+    {label: 'Total Trades', value: (m.total_trades || 0).toString(), positive: true},
+    {label: investedLabel, value: '₹' + investedValue.toLocaleString('en-IN'), positive: true},
+    {label: 'Final Capital', value: '₹' + m.final_capital.toLocaleString('en-IN'), positive: m.final_capital > investedValue},
+  ];
+
+  const mRow = document.getElementById('metricsRow');
+  mRow.innerHTML = metricsConfig.map(mc => `
+    <div class="metric-card">
+      <div class="label">${mc.label}</div>
+      <div class="value ${mc.positive ? 'positive' : 'negative'}">${mc.value}</div>
+      ${mc.subtitle ? `<div style="font-size:0.7rem;color:var(--muted);margin-top:2px;">${mc.subtitle}</div>` : ''}
+    </div>
+  `).join('');
+
+  // Build benchmark selector and render equity chart
+  buildBmSelector('bmSelectorDaily', data.benchmark_names || [], onDailyBmChange);
+  renderEquityChart(data);
+
+  // Portfolio table
+  const tbody = document.querySelector('#portfolioTable tbody');
+  tbody.innerHTML = '';
+  const hd = data.final_holdings_detail || {};
+  let totalInvested = 0, totalCurrentVal = 0;
+  data.final_portfolio.forEach((etf, i) => {
+    const meta = data.universe_snapshot.find(u => u.scrip === etf) || {};
+    const h = hd[etf] || {};
+    totalInvested += h.invested || 0;
+    totalCurrentVal += h.current_value || 0;
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'positive' : 'negative';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td><strong>${etf}</strong></td>
+      <td>${meta.sector || ''}</td>
+      <td>${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td>₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td>${h.buy_date || '-'}</td>
+      <td>₹${h.current_price ? h.current_price.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.invested ? h.invested.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td class="${pnlCls}">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
+      <td>${(data.final_weights[etf] * 100).toFixed(1)}%</td>
+      <td>${meta.rank || '-'}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Total row
+  const totalPnlPct = totalInvested > 0 ? ((totalCurrentVal / totalInvested - 1) * 100).toFixed(2) : '0';
+  const totalPnlCls = parseFloat(totalPnlPct) >= 0 ? 'positive' : 'negative';
+  const totalTr = document.createElement('tr');
+  totalTr.style.fontWeight = 'bold';
+  totalTr.style.borderTop = '2px solid var(--accent)';
+  totalTr.innerHTML = `
+    <td colspan="3">Total Portfolio</td>
+    <td colspan="4"></td>
+    <td>₹${totalInvested.toLocaleString('en-IN')}</td>
+    <td>₹${totalCurrentVal.toLocaleString('en-IN')}</td>
+    <td class="${totalPnlCls}">${totalPnlPct}%</td>
+    <td>100%</td>
+    <td></td>
+  `;
+  tbody.appendChild(totalTr);
+}
+
+// Shared benchmark color/dash config
+const BM_COLORS = ['#8b8fa3', '#f59e0b', '#ef4444', '#10b981', '#fbbf24', '#94a3b8', '#ec4899'];
+const BM_DASHES = [[5,3],[8,4],[3,3],[6,3],[10,5],[4,4],[7,3]];
+
+function buildBmSelector(containerId, bmNames, onChange) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '<span style="color:var(--muted);margin-right:4px;">Benchmarks:</span>';
+  bmNames.forEach((name, idx) => {
+    const color = BM_COLORS[idx % BM_COLORS.length];
+    const id = containerId + '_bm_' + idx;
+    const checked = name === 'Nifty 50' ? 'checked' : '';
+    container.innerHTML += `
+      <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="checkbox" id="${id}" value="${name}" ${checked}
+               style="accent-color:${color};" onchange="(${onChange.name})()">
+        <span style="color:${color};font-weight:500;">${name}</span>
+      </label>`;
+  });
+}
+
+function getSelectedBm(containerId, bmNames) {
+  const selected = [];
+  bmNames.forEach((name, idx) => {
+    const cb = document.getElementById(containerId + '_bm_' + idx);
+    if (cb && cb.checked) selected.push(name);
+  });
+  return selected;
+}
+
+function renderEquityChart(data) {
+  const ctx = document.getElementById('equityChart').getContext('2d');
+  if (equityChartInstance) equityChartInstance.destroy();
+
+  const bmNames = data.benchmark_names || [];
+  const bmCurves = data.benchmark_curves || {};
+  const selectedBm = getSelectedBm('bmSelectorDaily', bmNames);
+
+  const eq = data.equity_curve;
+  const totalDays = eq.length;
+  const isMonthlyView = totalDays > 63; // > 3 months (~63 trading days)
+
+  let labels = [], eqData = [];
+  const bmDataArrays = {};
+  selectedBm.forEach(name => { bmDataArrays[name] = []; });
+
+  if (isMonthlyView) {
+    // Show month-end points
+    const monthlyEq = getMonthEndPoints(eq);
+    labels = monthlyEq.map(p => p.date.substring(0, 7)); // "YYYY-MM"
+    eqData = monthlyEq.map(p => p.value);
+    selectedBm.forEach(name => {
+      const monthlyBm = getMonthEndPoints(bmCurves[name] || []);
+      bmDataArrays[name] = monthlyBm.map(p => p.value);
+    });
+  } else {
+    // Show daily points (downsample if too many)
+    const maxPoints = 500;
+    const step = Math.max(1, Math.floor(eq.length / maxPoints));
+    for (let i = 0; i < eq.length; i += step) {
+      labels.push(eq[i].date);
+      eqData.push(eq[i].value);
+      selectedBm.forEach(name => {
+        const curve = bmCurves[name] || [];
+        bmDataArrays[name].push(curve[i] ? curve[i].value : null);
+      });
+    }
+  }
+
+  const datasets = [
+    {
+      label: 'Portfolio',
+      data: eqData,
+      borderColor: '#6366f1',
+      backgroundColor: 'rgba(99,102,241,0.1)',
+      fill: true,
+      pointRadius: 0,
+      borderWidth: 2,
+      tension: 0.1,
+    },
+  ];
+
+  selectedBm.forEach(name => {
+    const idx = bmNames.indexOf(name);
+    datasets.push({
+      label: name,
+      data: bmDataArrays[name],
+      borderColor: BM_COLORS[idx % BM_COLORS.length],
+      borderDash: BM_DASHES[idx % BM_DASHES.length],
+      pointRadius: 0,
+      borderWidth: 1.5,
+      tension: 0.1,
+    });
+  });
+
+  equityChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8b8fa3', font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: '#1a1d29',
+          titleColor: '#e1e4ea',
+          bodyColor: '#e1e4ea',
+          borderColor: '#2a2d3a',
+          borderWidth: 1,
+          callbacks: {
+            label: ctx => ctx.dataset.label + ': ₹' + ctx.parsed.y.toLocaleString('en-IN'),
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8b8fa3', maxTicksLimit: 12, font: { size: 10 } },
+          grid: { color: 'rgba(42,45,58,0.5)' },
+        },
+        y: {
+          ticks: {
+            color: '#8b8fa3',
+            callback: v => '₹' + (v / 100000).toFixed(1) + 'L',
+            font: { size: 10 },
+          },
+          grid: { color: 'rgba(42,45,58,0.5)' },
+        },
+      },
+    },
+  });
+}
+
+// Callbacks for checkbox changes
+function onDailyBmChange() { if (lastResult) renderEquityChart(lastResult); }
+function onMonthlyBmChange() { if (lastResult) renderMonthlyChartFromData(lastResult); }
+
+// ── Render Universe ──────────────────────────────────────────────────
+function renderUniverse(data) {
+  if (!data.universe_snapshot || !data.universe_snapshot.length) return;
+  document.getElementById('noUniverse').style.display = 'none';
+  document.getElementById('universeContent').style.display = 'block';
+
+  // Build dynamic return columns
+  const snap = data.universe_snapshot;
+  const retKeys = Object.keys(snap[0]).filter(k => k.startsWith('ret_'));
+
+  // Rebuild thead
+  const thead = document.querySelector('#universeTable thead tr');
+  thead.innerHTML = '<th>Rank</th><th>Scrip</th><th>Sector</th><th>Score</th>';
+  retKeys.forEach(k => {
+    const label = k.replace('ret_', '').replace('d', 'D Ret%');
+    thead.innerHTML += `<th>${label}</th>`;
+  });
+  thead.innerHTML += '<th>Sharpe</th><th>RSI</th><th>Vol%</th><th>In PF</th>';
+
+  const tbody = document.querySelector('#universeTable tbody');
+  tbody.innerHTML = '';
+  snap.forEach(u => {
+    const tr = document.createElement('tr');
+    if (u.in_portfolio) tr.className = 'in-portfolio';
+    let retCells = retKeys.map(k => {
+      const v = u[k];
+      if (v === null || v === undefined) return '<td>-</td>';
+      const cls = v >= 0 ? 'positive' : 'negative';
+      return `<td style="color:var(--${v >= 0 ? 'green' : 'red'})">${v.toFixed(1)}%</td>`;
+    }).join('');
+    tr.innerHTML = `
+      <td>${u.rank}</td>
+      <td><strong>${u.scrip}</strong></td>
+      <td style="font-size:0.8rem;">${u.sector}</td>
+      <td>${u.score.toFixed(1)}</td>
+      ${retCells}
+      <td>${u.sharpe.toFixed(2)}</td>
+      <td>${u.rsi.toFixed(0)}</td>
+      <td>${u.volatility.toFixed(1)}</td>
+      <td>${u.in_portfolio ? '&#10004;' : ''}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Render Events ────────────────────────────────────────────────────
+function formatHoldingsDetail(hd) {
+  if (!hd || !Object.keys(hd).length) return '';
+  let html = '<table style="font-size:0.75rem;margin-top:6px;width:100%;border-collapse:collapse;">';
+  html += '<tr style="color:var(--muted);border-bottom:1px solid var(--border);">';
+  html += '<th style="text-align:left;padding:2px 6px;">ETF</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Units</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Buy Price</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Cur Price</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Invested</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">Cur Value</th>';
+  html += '<th style="text-align:right;padding:2px 6px;">P&L%</th></tr>';
+  let totInv = 0, totCur = 0;
+  Object.entries(hd).forEach(([etf, h]) => {
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    totInv += h.invested || 0;
+    totCur += h.current_value || 0;
+    html += `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:2px 6px;">${etf}</td>
+      <td style="text-align:right;padding:2px 6px;">${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.current_price ? h.current_price.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.invested ? h.invested.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;">₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td style="text-align:right;padding:2px 6px;color:${pnlCls};">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
+    </tr>`;
+  });
+  const totPnl = totInv > 0 ? ((totCur / totInv - 1) * 100).toFixed(2) : '0';
+  const totPnlCls = parseFloat(totPnl) >= 0 ? 'var(--green)' : 'var(--red)';
+  html += `<tr style="font-weight:bold;border-top:2px solid var(--accent);">
+    <td style="padding:2px 6px;">Total</td><td></td><td></td><td></td>
+    <td style="text-align:right;padding:2px 6px;">₹${totInv.toLocaleString('en-IN')}</td>
+    <td style="text-align:right;padding:2px 6px;">₹${totCur.toLocaleString('en-IN')}</td>
+    <td style="text-align:right;padding:2px 6px;color:${totPnlCls};">${totPnl}%</td>
+  </tr>`;
+  html += '</table>';
+  return html;
+}
+
+function renderEvents(data) {
+  if (!data.events || !data.events.length) return;
+  document.getElementById('noEvents').style.display = 'none';
+  document.getElementById('eventsContent').style.display = 'block';
+
+  const container = document.getElementById('eventsTimeline');
+  container.innerHTML = '';
+  data.events.forEach(ev => {
+    const item = document.createElement('div');
+    item.className = 'event-item';
+    const hdTable = formatHoldingsDetail(ev.holdings_detail);
+    let detail = '';
+    if (ev.type === 'INITIAL_SELECTION') {
+      detail = `<div>Initial portfolio: <strong>${ev.portfolio.join(', ')}</strong></div>
+                <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}</div>
+                ${hdTable}`;
+    } else if (ev.type === 'REBALANCE') {
+      const exits = ev.exits && ev.exits.length
+        ? `<span class="exit">Exit: ${ev.exits.join(', ')}</span>` : '';
+      const entries = ev.entries && ev.entries.length
+        ? `<span class="entry">Enter: ${ev.entries.join(', ')}</span>` : '';
+      // Build exit details table if available
+      let exitDetailsHtml = '';
+      if (ev.exit_details && Object.keys(ev.exit_details).length > 0) {
+        let exitRows = Object.entries(ev.exit_details).map(([etf, d]) => 
+          `<tr><td>${etf}</td><td>${d.units}</td><td>₹${d.exit_price.toLocaleString('en-IN')}</td><td>₹${d.exit_value.toLocaleString('en-IN')}</td></tr>`
+        ).join('');
+        exitDetailsHtml = `<div style="margin-top:8px;font-size:0.8rem;">
+          <div style="color:var(--muted);margin-bottom:4px;">Exit Details:</div>
+          <table style="width:100%;font-size:0.75rem;">
+            <thead><tr><th>ETF</th><th>Units</th><th>Exit Price</th><th>Exit Value</th></tr></thead>
+            <tbody>${exitRows}</tbody>
+          </table>
+        </div>`;
+      }
+      detail = `${exits} ${entries}
+                <div>Portfolio: ${ev.portfolio.join(', ')}</div>
+                <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}
+                ${ev.txn_cost ? ' (cost: ₹' + ev.txn_cost.toLocaleString('en-IN') + ')' : ''}</div>
+                ${exitDetailsHtml}
+                ${hdTable}`;
+    } else {
+      detail = `No changes. Capital: ₹${ev.capital.toLocaleString('en-IN')}
+               ${hdTable}`;
+    }
+    item.innerHTML = `
+      <div class="event-date">${ev.date}</div>
+      <div>
+        <span class="event-type ${ev.type}">${ev.type.replace(/_/g, ' ')}</span>
+        <div class="event-detail">${detail}</div>
+      </div>
+    `;
+    container.appendChild(item);
+  });
+}
+
+// ── Monthly View ─────────────────────────────────────────────────────
+let monthlyChartInstance = null;
+
+function renderMonthlyView(data) {
+  if (!data.equity_curve || !data.equity_curve.length) return;
+  document.getElementById('noMonthly').style.display = 'none';
+  document.getElementById('monthlyContent').style.display = 'block';
+
+  buildBmSelector('bmSelectorMonthly', data.benchmark_names || [], onMonthlyBmChange);
+  renderMonthlyChartFromData(data);
+  populateMonthDropdown(data);
+  renderValidationTable(data);
+}
+
+function renderMonthlyChartFromData(data) {
+  const monthlyEq = getMonthEndPoints(data.equity_curve);
+  const bmNames = data.benchmark_names || [];
+  const bmCurves = data.benchmark_curves || {};
+  const selectedBm = getSelectedBm('bmSelectorMonthly', bmNames);
+  const monthlyBms = {};
+  selectedBm.forEach(name => {
+    monthlyBms[name] = getMonthEndPoints(bmCurves[name] || []);
+  });
+  renderMonthlyChart(monthlyEq, monthlyBms, selectedBm, bmNames);
+}
+
+function getMonthEndPoints(curve) {
+  if (!curve || !curve.length) return [];
+  const monthMap = {};
+  curve.forEach(pt => {
+    const ym = pt.date.substring(0, 7); // "YYYY-MM"
+    monthMap[ym] = pt; // last entry per month wins (month-end)
+  });
+  return Object.values(monthMap).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function renderMonthlyChart(monthlyEq, monthlyBms, bmNames, allBmNames) {
+  const ctx = document.getElementById('monthlyEquityChart').getContext('2d');
+  if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+  const labels = monthlyEq.map(p => p.date.substring(0, 7));
+  const eqData = monthlyEq.map(p => p.value);
+
+  const datasets = [
+    {
+      label: 'Portfolio (Monthly)',
+      data: eqData,
+      borderColor: '#6366f1',
+      backgroundColor: 'rgba(99,102,241,0.15)',
+      fill: true,
+      pointRadius: 4,
+      pointBackgroundColor: '#6366f1',
+      borderWidth: 2.5,
+      tension: 0.2,
+    },
+  ];
+
+  bmNames.forEach(name => {
+    const idx = (allBmNames || bmNames).indexOf(name);
+    const pts = monthlyBms[name] || [];
+    datasets.push({
+      label: name,
+      data: pts.map(p => p.value),
+      borderColor: BM_COLORS[idx % BM_COLORS.length],
+      borderDash: BM_DASHES[idx % BM_DASHES.length],
+      pointRadius: 3,
+      pointBackgroundColor: BM_COLORS[idx % BM_COLORS.length],
+      borderWidth: 1.5,
+      tension: 0.2,
+    });
+  });
+
+  monthlyChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8b8fa3', font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: '#1a1d29',
+          titleColor: '#e1e4ea',
+          bodyColor: '#e1e4ea',
+          borderColor: '#2a2d3a',
+          borderWidth: 1,
+          callbacks: {
+            label: ctx => ctx.dataset.label + ': ₹' + ctx.parsed.y.toLocaleString('en-IN'),
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8b8fa3', font: { size: 10 } },
+          grid: { color: 'rgba(42,45,58,0.5)' },
+        },
+        y: {
+          ticks: {
+            color: '#8b8fa3',
+            callback: v => '₹' + (v / 100000).toFixed(1) + 'L',
+            font: { size: 10 },
+          },
+          grid: { color: 'rgba(42,45,58,0.5)' },
+        },
+      },
+    },
+  });
+}
+
+function populateMonthDropdown(data) {
+  const select = document.getElementById('monthSelector');
+  select.innerHTML = '<option value="">-- Select a month --</option>';
+
+  // Collect all unique months from the equity curve
+  const months = new Set();
+  data.equity_curve.forEach(pt => months.add(pt.date.substring(0, 7)));
+  const sorted = [...months].sort();
+
+  sorted.forEach(ym => {
+    const opt = document.createElement('option');
+    opt.value = ym;
+    const [y, m] = ym.split('-');
+    const monthName = new Date(+y, +m - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+    opt.textContent = monthName;
+    select.appendChild(opt);
+  });
+
+  select.onchange = () => {
+    const ym = select.value;
+    if (!ym) {
+      document.getElementById('monthDetail').style.display = 'none';
+      return;
+    }
+    renderMonthDetail(data, ym);
+  };
+}
+
+function renderMonthDetail(data, ym) {
+  document.getElementById('monthDetail').style.display = 'block';
+  const [y, m] = ym.split('-');
+  const monthName = new Date(+y, +m - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  document.getElementById('monthLabel').textContent = monthName;
+  document.getElementById('monthLabel2').textContent = monthName;
+
+  // Find the portfolio that was running during this month.
+  // Walk events up to and including this month to find the last known portfolio.
+  let activePortfolio = [];
+  let activeWeights = {};
+  let activeRankings = {};
+  let capitalAtMonth = null;
+
+  let activeHoldingsDetail = {};
+
+  data.events.forEach(ev => {
+    const evYm = ev.date.substring(0, 7);
+    if (evYm <= ym) {
+      if (ev.portfolio) activePortfolio = [...ev.portfolio];
+      if (ev.weights) activeWeights = { ...ev.weights };
+      if (ev.rankings) activeRankings = { ...ev.rankings };
+      if (ev.holdings_detail) activeHoldingsDetail = { ...ev.holdings_detail };
+      if (ev.capital !== undefined) capitalAtMonth = ev.capital;
+    }
+  });
+
+  // Get month-end capital from equity curve
+  // Month Start = previous month's end value (or initial capital if first month)
+  let monthEndCapital = null;
+  let monthStartCapital = null;
+
+  // Find previous month (reuse y, m from line 1013)
+  const yNum = parseInt(y, 10);
+  const mNum = parseInt(m, 10);
+  const prevMonth = mNum === 1 ? `${yNum-1}-12` : `${yNum}-${String(mNum-1).padStart(2, '0')}`;
+
+  data.equity_curve.forEach(pt => {
+    const ptYm = pt.date.substring(0, 7);
+    if (ptYm === prevMonth) {
+      monthStartCapital = pt.value; // last point of previous month
+    }
+    if (ptYm === ym) {
+      if (monthEndCapital === null && monthStartCapital === null) {
+        // First month - use first point as start
+        monthStartCapital = pt.value;
+      }
+      monthEndCapital = pt.value;
+    }
+  });
+
+  // Render portfolio table
+  const tbody = document.querySelector('#monthPortfolioTable tbody');
+  tbody.innerHTML = '';
+  activePortfolio.forEach((etf, i) => {
+    const tr = document.createElement('tr');
+    const wt = activeWeights[etf] ? (activeWeights[etf] * 100).toFixed(1) + '%' : '-';
+    const h = activeHoldingsDetail[etf] || {};
+    const rank = activeRankings[etf] || '-';
+    const pnlCls = (h.pnl_pct || 0) >= 0 ? 'positive' : 'negative';
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td><strong>${etf}</strong></td>
+      <td>${h.units ? h.units.toFixed(2) : '-'}</td>
+      <td>₹${h.buy_price ? h.buy_price.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.current_price ? h.current_price.toLocaleString('en-IN') : '-'}</td>
+      <td>₹${h.current_value ? h.current_value.toLocaleString('en-IN') : '-'}</td>
+      <td class="${pnlCls}">${h.pnl_pct !== undefined ? h.pnl_pct + '%' : '-'}</td>
+      <td>${wt}</td>
+      <td>${rank}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Month metrics
+  const metricsDiv = document.getElementById('monthMetrics');
+  if (monthStartCapital !== null && monthEndCapital !== null) {
+    const monthReturn = ((monthEndCapital - monthStartCapital) / monthStartCapital * 100).toFixed(2);
+    const cls = monthReturn >= 0 ? 'positive' : 'negative';
+    metricsDiv.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">
+        <div class="metric-card" style="flex:1;min-width:120px;">
+          <div class="label">Month Start</div>
+          <div class="value">₹${monthStartCapital.toLocaleString('en-IN')}</div>
+        </div>
+        <div class="metric-card" style="flex:1;min-width:120px;">
+          <div class="label">Month End</div>
+          <div class="value">₹${monthEndCapital.toLocaleString('en-IN')}</div>
+        </div>
+        <div class="metric-card" style="flex:1;min-width:120px;">
+          <div class="label">Month Return</div>
+          <div class="value ${cls}">${monthReturn}%</div>
+        </div>
+      </div>
+    `;
+  } else {
+    metricsDiv.innerHTML = '';
+  }
+
+  // Filter events for the selected month
+  const monthEvents = data.events.filter(ev => ev.date.substring(0, 7) === ym);
+  const evContainer = document.getElementById('monthEventsTimeline');
+  const noEvMsg = document.getElementById('noMonthEvents');
+
+  if (monthEvents.length === 0) {
+    evContainer.innerHTML = '';
+    noEvMsg.style.display = 'block';
+  } else {
+    noEvMsg.style.display = 'none';
+    evContainer.innerHTML = '';
+    monthEvents.forEach(ev => {
+      const item = document.createElement('div');
+      item.className = 'event-item';
+      let detail = '';
+      if (ev.type === 'INITIAL_SELECTION') {
+        detail = `<div>Initial portfolio: <strong>${ev.portfolio.join(', ')}</strong></div>
+                  <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}</div>`;
+      } else if (ev.type === 'REBALANCE') {
+        const exits = ev.exits && ev.exits.length
+          ? `<span class="exit">Exit: ${ev.exits.join(', ')}</span>` : '';
+        const entries = ev.entries && ev.entries.length
+          ? `<span class="entry">Enter: ${ev.entries.join(', ')}</span>` : '';
+        // Build exit details if available
+        let exitDetailsHtml = '';
+        if (ev.exit_details && Object.keys(ev.exit_details).length > 0) {
+          let exitRows = Object.entries(ev.exit_details).map(([etf, d]) => 
+            `<tr><td>${etf}</td><td>${d.units}</td><td>₹${d.exit_price.toLocaleString('en-IN')}</td><td>₹${d.exit_value.toLocaleString('en-IN')}</td></tr>`
+          ).join('');
+          exitDetailsHtml = `<div style="margin-top:6px;font-size:0.75rem;">
+            <div style="color:var(--muted);margin-bottom:2px;">Exit Details:</div>
+            <table style="width:100%;font-size:0.7rem;border-collapse:collapse;">
+              <thead><tr style="border-bottom:1px solid var(--border)"><th>ETF</th><th>Units</th><th>Exit Price</th><th>Value</th></tr></thead>
+              <tbody>${exitRows}</tbody>
+            </table>
+          </div>`;
+        }
+        detail = `${exits} ${entries}
+                  <div>Portfolio: ${ev.portfolio.join(', ')}</div>
+                  <div>Capital: ₹${ev.capital.toLocaleString('en-IN')}
+                  ${ev.txn_cost ? ' (cost: ₹' + ev.txn_cost.toLocaleString('en-IN') + ')' : ''}</div>
+                  ${exitDetailsHtml}`;
+      } else {
+        detail = `No changes. Capital: ₹${ev.capital.toLocaleString('en-IN')}`;
+      }
+      item.innerHTML = `
+        <div class="event-date">${ev.date}</div>
+        <div>
+          <span class="event-type ${ev.type}">${ev.type.replace(/_/g, ' ')}</span>
+          <div class="event-detail">${detail}</div>
+        </div>
+      `;
+      evContainer.appendChild(item);
+    });
+  }
+}
+
+// ── Validation Table ─────────────────────────────────────────────────
+function renderValidationTable(data) {
+  const summary = data.monthly_summary;
+  if (!summary || !summary.length) return;
+
+  const bmNames = data.benchmark_names || [];
+
+  // Build dynamic header
+  const thead = document.getElementById('validationTableHead');
+  let headHtml = `<th>Month</th><th>Open (₹)</th><th>Close (₹)</th>
+    <th>High (₹)</th><th>Low (₹)</th><th>Month Ret%</th><th>Cumul. Ret%</th>`;
+  bmNames.forEach(name => {
+    headHtml += `<th>${name} %</th>`;
+  });
+  headHtml += `<th>Alpha%</th><th>DD from Peak%</th><th>Peak (₹)</th>
+    <th>Days</th><th>Rebal</th><th>Exits</th><th>Entries</th><th>Txn Cost (₹)</th><th>Portfolio</th>`;
+  thead.innerHTML = headHtml;
+
+  const tbody = document.querySelector('#validationTable tbody');
+  tbody.innerHTML = '';
+
+  summary.forEach((row, i) => {
+    const [y, m] = row.month.split('-');
+    const monthLabel = new Date(+y, +m - 1).toLocaleString('en-US', { month: 'short', year: 'numeric' });
+    const retCls = row.return_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+    const cumCls = row.cumulative_return_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+    const alphaCls = row.alpha_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+    const ddCls = row.drawdown_from_peak_pct > 0 ? 'color:var(--red)' : '';
+
+    let bmCells = '';
+    const bmReturns = row.benchmark_returns || {};
+    bmNames.forEach(name => {
+      const val = bmReturns[name] || 0;
+      const cls = val >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+      bmCells += `<td style="${cls}">${val >= 0 ? '+' : ''}${val}%</td>`;
+    });
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${monthLabel}</strong></td>
+      <td>₹${row.open.toLocaleString('en-IN')}</td>
+      <td>₹${row.close.toLocaleString('en-IN')}</td>
+      <td>₹${row.high.toLocaleString('en-IN')}</td>
+      <td>₹${row.low.toLocaleString('en-IN')}</td>
+      <td style="${retCls};font-weight:600">${row.return_pct >= 0 ? '+' : ''}${row.return_pct}%</td>
+      <td style="${cumCls}">${row.cumulative_return_pct >= 0 ? '+' : ''}${row.cumulative_return_pct}%</td>
+      ${bmCells}
+      <td style="${alphaCls};font-weight:600">${row.alpha_pct >= 0 ? '+' : ''}${row.alpha_pct}%</td>
+      <td style="${ddCls}">${row.drawdown_from_peak_pct > 0 ? '-' : ''}${row.drawdown_from_peak_pct}%</td>
+      <td>₹${row.peak_value.toLocaleString('en-IN')}</td>
+      <td>${row.trading_days}</td>
+      <td>${row.rebalances}</td>
+      <td style="color:var(--red);font-size:0.75rem">${row.exits.length ? row.exits.join(', ') : '-'}</td>
+      <td style="color:var(--green);font-size:0.75rem">${row.entries.length ? row.entries.join(', ') : '-'}</td>
+      <td>${row.txn_costs > 0 ? '₹' + row.txn_costs.toLocaleString('en-IN') : '-'}</td>
+      <td style="font-size:0.7rem;max-width:180px;white-space:normal">${row.portfolio.join(', ')}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+</script>
+</body>
+</html>

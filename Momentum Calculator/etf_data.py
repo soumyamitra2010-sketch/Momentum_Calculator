@@ -95,7 +95,6 @@ ALL_ETF_UNIVERSE = [
     {"scrip": "BANKBEES", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 15000, "lcp": 450.20},
     {"scrip": "BANKIETF", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 5200, "lcp": 451.30},
     {"scrip": "SETFNIFBK", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 2200, "lcp": 450.80},
-    {"scrip": "ICICIBANK", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 3800, "lcp": 452.10},  # CORRECTED: ICICIBANK works
     {"scrip": "HDFCBANK", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 6200, "lcp": 450.90},  # CORRECTED: HDFCBANK works
     {"scrip": "KOTAKBANK", "sector": "Banking & Financial", "segment": "Nifty Bank", "market_cap": 2800, "lcp": 451.50},  # CORRECTED: KOTAKBANK works
     {"scrip": "PSUBNKBEES", "sector": "Banking & Financial", "segment": "Nifty PSU Bank", "market_cap": 5500, "lcp": 72.30},

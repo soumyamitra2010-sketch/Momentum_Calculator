@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file, Response
 from engine import MomentumEngine
-from etf_data import ETF_UNIVERSE
+from etf_data import ALL_ETF_UNIVERSE, ETF_UNIVERSE
 # Profile storage
 PROFILE_FILE = "profiles.json"
 MAX_PROFILES = 10
@@ -177,9 +177,10 @@ def run_backtest():
     print(f"[DEBUG] ETF universe type: {type(etf_universe)}")
     
     if etf_universe and isinstance(etf_universe, list) and len(etf_universe) >= 20:
-        # Use custom universe - filter to only include ETFs that exist in our data
+        # Use custom universe - only accept declared ETFs with loaded price data.
         available_etfs = set(engine.prices.keys())
-        valid_custom = [e for e in etf_universe if e in available_etfs]
+        declared_etfs = {etf["scrip"] for etf in ALL_ETF_UNIVERSE}
+        valid_custom = [e for e in etf_universe if e in declared_etfs and e in available_etfs]
         print(f"[DEBUG] Valid custom ETFs: {valid_custom}")
         if len(valid_custom) >= 20:
             config["_custom_etf_list"] = valid_custom

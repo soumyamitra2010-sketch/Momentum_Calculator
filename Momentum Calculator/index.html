@@ -997,6 +997,17 @@ async function loadETFDataFromServer() {
     const response = await fetch(API + '/info');
     const data = await response.json();
     allETFs = data.available_etfs || [];
+    const availableScrips = new Set(allETFs.map(etf => etf.scrip));
+    const removedScrips = currentETFSelection.filter(scrip => !availableScrips.has(scrip));
+    if (removedScrips.length > 0) {
+      currentETFSelection = currentETFSelection.filter(scrip => availableScrips.has(scrip));
+      localStorage.setItem('etfUniverseSelection', JSON.stringify({
+        scrips: currentETFSelection,
+        mode: selectedMode,
+        timestamp: new Date().toISOString()
+      }));
+      console.log('Removed unavailable ETFs from saved selection:', removedScrips);
+    }
     
     // Update the total ETF count in the mode option text
     const customModeOption = document.querySelector('.mode-option:nth-child(2) p');
